@@ -28,6 +28,9 @@ class TrialRunJobTests(unittest.TestCase):
     def test_trial_run_exercises_full_probe(self) -> None:
         self.assertIn("full_probe", self.text)
 
+    def test_trial_run_exercises_single_probe(self) -> None:
+        self.assertIn("/api/probe", self.text)
+
     def test_trial_run_verifies_dual_vless_paths(self) -> None:
         self.assertIn("/ws-node", self.text)
         self.assertIn("/ws-chain", self.text)

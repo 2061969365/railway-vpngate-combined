@@ -499,6 +499,29 @@ jobs:
           print(f"trial: {len(measured)}/{len(status['endpoints'])} endpoints with real latency after full probe")
           assert measured, "trial: full probe filled no real latency"
           EOF
+      - name: Single-node probe via container API
+        run: |
+          TAG=$(python3 -c "import json;print(json.load(open('/tmp/trial-full.json'))['endpoints'][0]['tag'])")
+          echo "probing single node $TAG"
+          curl -m 10 -s -X POST -H "Authorization: Bearer trial-admin-token-0123456789" \
+            -d "{\"tag\":\"$TAG\"}" http://127.0.0.1:3000/api/probe | grep -q '"accepted": true' || {
+            echo "single probe not accepted"; exit 1; }
+          echo "single probe accepted, polling for done (up to ~10min)..."
+          for i in $(seq 1 40); do
+            curl -m 10 -s -H "Authorization: Bearer trial-admin-token-0123456789" \
+              http://127.0.0.1:3000/api/status -o /tmp/trial-single.json
+            if python3 -c "import json;s=json.load(open('/tmp/trial-single.json'))['probe'];exit(0 if s['state']=='done' and s['tag']=='$TAG' else 1)"; then
+              echo "single probe done after ~$((i * 15))s"; break
+            fi
+            sleep 15
+          done
+          python3 - <<'EOF'
+          import json
+          probe = json.load(open("/tmp/trial-single.json"))["probe"]
+          print("single probe:", probe)
+          assert probe["state"] == "done" and probe["tag"], \
+              "trial: single probe did not finish"
+          EOF
       - name: Cleanup
         if: always()
         run: |

@@ -77,6 +77,8 @@ curl http://127.0.0.1:3000/healthz   # ok
 
 管理页：`http://127.0.0.1:3000/ui`（粘贴 ADMIN_TOKEN）。
 全量真测：管理页按钮或 `POST /api/full_probe`（需 `Authorization: Bearer`）。
+单节点测速：节点列表每行“测速”链接，或 `POST /api/probe {"tag":"vpngate-N"}`；
+测通的节点自动可切换（全部存活节点本就在 sing-box 配置里，无需重建）。
 
 ## CI
 

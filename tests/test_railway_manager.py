@@ -462,6 +462,122 @@ class FullProbeTests(unittest.TestCase):
         self.assertIsNotNone(dial_fn)
 
 
+class SingleProbeTests(unittest.TestCase):
+    """POST /api/probe dials one untried node; success auto-marks it usable."""
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"/tmp/railway-single-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-single-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-single-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _post_json(self, manager, path, payload, token=True):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        raw = json.dumps(payload).encode()
+        headers = (f"POST {path} HTTP/1.1\r\nContent-Length: {len(raw)}\r\n"
+                   + (f"Authorization: Bearer {self.TOKEN}\r\n" if token else ""))
+        client = FakeClient()
+        manager._handle_http(client, (headers + "\r\n").encode("latin-1") + raw)
+        head, _, body = client.sent.partition(b"\r\n\r\n")
+        return head.decode("latin-1").split("\r\n")[0], body
+
+    def _seed_nodes(self, manager, *ips):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": 100, "real_latency_ms": None,
+                           "speed": 1000,
+                           "endpoint": {"tag": f"vpngate-{i}"}}
+                          for i, ip in enumerate(ips)]
+
+    def test_probe_rejects_missing_token(self) -> None:
+        manager = self._manager()
+        try:
+            status_line, _ = self._post_json(manager, "/api/probe",
+                                             {"tag": "vpngate-0"}, token=False)
+        finally:
+            manager.stop()
+
+        self.assertIn("401", status_line)
+
+    def test_probe_unknown_tag_returns_404(self) -> None:
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, "203.0.113.11")
+            status_line, body = self._post_json(manager, "/api/probe",
+                                                {"tag": "vpngate-9"})
+        finally:
+            manager.stop()
+
+        self.assertIn("404", status_line)
+        self.assertFalse(json.loads(body.decode())["ok"])
+
+    def test_probe_missing_tag_returns_400(self) -> None:
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, "203.0.113.11")
+            status_line, _ = self._post_json(manager, "/api/probe", {})
+        finally:
+            manager.stop()
+
+        self.assertIn("400", status_line)
+
+    def test_probe_dials_only_the_requested_node(self) -> None:
+        calls = []
+        manager = self._manager(
+            dial_fn=lambda node: calls.append(node["server"]) or 123)
+        try:
+            self._seed_nodes(manager, "203.0.113.11", "203.0.113.12")
+            status_line, body = self._post_json(manager, "/api/probe",
+                                                {"tag": "vpngate-1"})
+            manager._single_probe_thread.join(timeout=30)
+        finally:
+            manager.stop()
+
+        self.assertIn("202", status_line)
+        self.assertTrue(json.loads(body.decode())["accepted"])
+        self.assertEqual(["203.0.113.12"], calls)
+        self.assertIsNone(manager._nodes[0]["real_latency_ms"])
+        self.assertEqual(123, manager._nodes[1]["real_latency_ms"])
+        probe = manager.status["probe"]
+        self.assertEqual("done", probe["state"])
+        self.assertEqual("vpngate-1", probe["tag"])
+        self.assertEqual(123, probe["ms"])
+
+    def test_probe_failure_keeps_none_and_records_error(self) -> None:
+        def _boom(node):
+            raise RuntimeError("tunnel down")
+
+        manager = self._manager(dial_fn=_boom)
+        try:
+            self._seed_nodes(manager, "203.0.113.11")
+            status_line, _ = self._post_json(manager, "/api/probe",
+                                             {"tag": "vpngate-0"})
+            manager._single_probe_thread.join(timeout=30)
+            history = [h["event"] for h in manager.status["refresh_history"]]
+        finally:
+            manager.stop()
+
+        self.assertIn("202", status_line)
+        self.assertIsNone(manager._nodes[0]["real_latency_ms"])
+        self.assertEqual("done", manager.status["probe"]["state"])
+        self.assertTrue(manager.status["probe"]["error"])
+        self.assertIn("single-probe", history)
+
+
 class AuthTests(unittest.TestCase):
     TOKEN = "test-admin-token-0123456789abcdef"
 
@@ -544,6 +660,11 @@ class AstraUiTests(unittest.TestCase):
         self.assertIn('id="btn-fullprobe"', UI_HTML)
         self.assertIn("fullProbeNow", UI_HTML)
         self.assertIn("/api/full_probe", UI_HTML)
+
+    def test_single_probe_button_calls_api_probe(self) -> None:
+        start = UI_HTML.index("async function probeOne")
+        block = UI_HTML[start:start + 600]
+        self.assertIn("/api/probe", block)
 
 
 class EnvValidationTests(unittest.TestCase):

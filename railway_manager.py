@@ -142,7 +142,8 @@ async function refresh() {
       "<td class='op'><a onclick='probeOne(" + e.tag + ")'>测速</a> <a onclick='switchTag(" + e.tag + ")'>切换</a></td></tr>").join("");
     document.getElementById("history-line").textContent =
       "refresh ok/fail: " + s.refresh_ok + "/" + s.refresh_fail + " · uptime: " + s.uptime_seconds + "s · error: " + s.last_error +
-      (s.full_probe && s.full_probe.state !== "idle" ? " · 全量真测: " + s.full_probe.state + " " + s.full_probe.done + "/" + s.full_probe.total : "");
+      (s.full_probe && s.full_probe.state !== "idle" ? " · 全量真测: " + s.full_probe.state + " " + s.full_probe.done + "/" + s.full_probe.total : "") +
+      (s.probe && s.probe.state !== "idle" ? " · 单测: " + s.probe.tag + " " + s.probe.state + (s.probe.ms != null ? " " + s.probe.ms + "ms" : "") : "");
     document.getElementById("foot-status").textContent = "uptime " + s.uptime_seconds + "s · refresh " + s.refresh_ok + "/" + s.refresh_fail;
   } catch (e) {
     document.getElementById("hero-sub").textContent = "status fetch failed: " + e;
@@ -153,7 +154,13 @@ async function switchTag(tag) {
   refresh();
 }
 async function probeOne(tag) {
-  await api("/api/switch", "POST", {"tag": tag});
+  await api("/api/probe", "POST", {"tag": tag});
+  document.getElementById("history-line").textContent = "单测 " + tag + " 进行中…";
+  for (let i = 0; i < 40; i++) {
+    await new Promise(r => setTimeout(r, 3000));
+    const s = await api("/api/status");
+    if (s.probe && s.probe.state === "done" && s.probe.tag === tag) break;
+  }
   refresh();
 }
 async function refreshNow() {
@@ -359,9 +366,11 @@ class RailwayManager:
             "proxy": f"127.0.0.1:{mixed_port}",
             "traffic": {"connections": 0, "bytes_up": 0, "bytes_down": 0},
             "full_probe": {"state": "idle", "done": 0, "total": 0},
+            "probe": {"state": "idle", "tag": None, "ms": None, "error": None},
             "tunnel": {"state": "off"},
         }
         self._full_probe_thread: threading.Thread | None = None
+        self._single_probe_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._listener: socket.socket | None = None
         self._singbox_proc: subprocess.Popen | None = None
@@ -512,6 +521,28 @@ class RailwayManager:
             client.sendall(_http_response(
                 "202 Accepted", "application/json",
                 json.dumps({"accepted": True}).encode()))
+        elif path == "/api/probe" and method == "POST":
+            try:
+                payload = json.loads((body or b"{}").decode("utf-8") or "{}")
+            except (ValueError, UnicodeDecodeError):
+                payload = None
+            if not isinstance(payload, dict) or not payload.get("tag"):
+                client.sendall(_http_response("400 Bad Request", "text/plain",
+                                              b"missing tag"))
+                return
+            node = next((n for n in self._nodes
+                         if n.get("endpoint", {}).get("tag") == payload["tag"]),
+                        None)
+            if node is None:
+                client.sendall(_http_response(
+                    "404 Not Found", "application/json",
+                    json.dumps({"ok": False, "error": "unknown tag"}).encode()))
+                return
+            self._start_single_probe(node)
+            client.sendall(_http_response(
+                "202 Accepted", "application/json",
+                json.dumps({"accepted": True,
+                            "tag": node["endpoint"]["tag"]}).encode()))
         elif path == "/api/switch" and method == "POST":
             try:
                 payload = json.loads((body or b"{}").decode("utf-8") or "{}")
@@ -958,6 +989,41 @@ class RailwayManager:
                          "speed": node.get("speed", 0)}
                 self.status["endpoints"].append(entry)
                 by_key[key] = entry
+
+    def _start_single_probe(self, node: dict) -> None:
+        with self._lock:
+            tag = node.get("endpoint", {}).get("tag")
+            self.status["probe"] = {"state": "running", "tag": tag,
+                                    "ms": None, "error": None}
+        thread = threading.Thread(target=self._run_single_probe, args=(node,),
+                                  daemon=True)
+        self._single_probe_thread = thread
+        thread.start()
+
+    def _run_single_probe(self, node: dict) -> None:
+        # No startup gate here (unlike the full probe): the caller polls
+        # /api/status for state==done, and an instant dial_fn in tests still
+        # lands "done" only after the thread actually ran.
+        tag = node.get("endpoint", {}).get("tag")
+        try:
+            ms = self.dial_fn(node)
+            error = None
+        except Exception as exc:
+            ms = None
+            error = f"{type(exc).__name__}: {exc}"
+        with self._lock:
+            node["real_latency_ms"] = ms
+            key = (node.get("server"), node.get("server_port"))
+            for ep in self.status["endpoints"]:
+                if (ep.get("server"), ep.get("server_port")) == key:
+                    ep["real_latency_ms"] = ms
+                    break
+            # The node was already in the sing-box config (every live node
+            # gets an endpoint at refresh), so a measured node is immediately
+            # switchable -- no config rebuild needed.
+            self.status["probe"] = {"state": "done", "tag": tag,
+                                    "ms": ms, "error": error}
+        self._record_history("single-probe", f"{tag} ms={ms}")
 
     def _fetch_with_retry(self, fetch) -> str:
         last_exc: Exception | None = None
