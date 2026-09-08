@@ -20,7 +20,9 @@ VPNGate 免费节点（sing-box `openvpn-client`，免 TUN/免特权）+ 双 VLE
 1. 新建 Service，指向本仓库，Region 建议新加坡（离 VPNGate 亚洲节点近）。
 2. Variables（必填）：
    - `PORT=3000`（固定端口，避开 8080/8081/8082/4096）
-   - `PROXY_USER` / `PROXY_PASS`（`PROXY_PASS` ≥ 16 位，否则拒绝启动）
+    - `PROXY_USER` / `PROXY_PASS`（可选；不填则每次启动自动生成随机值。
+      走 VLESS+tunnel 时用不到；只有直连 SOCKS5 调试时才需要。
+      显式填写的话 `PROXY_PASS` 须 ≥ 16 位，否则拒绝启动）
    - `ADMIN_TOKEN`（≥ 16 位，用于 `/ui` + `/api`）
    - `TUNNEL_TOKEN`（Cloudflare tunnel token；缺失则 tunnel 软跳过，
      代理本身照常工作，`status["tunnel"] == "no-token"`）
