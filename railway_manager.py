@@ -211,11 +211,16 @@ def build_config_from_env(env: dict) -> dict:
     if urllib.parse.urlsplit(snapshot_url).scheme != "https":
         print("refusing to start: SNAPSHOT_URL must be https", flush=True)
         raise SystemExit(2)
-    admin_token = env.get("ADMIN_TOKEN", "")
-    generated = False
-    if len(admin_token) < MIN_ADMIN_TOKEN_LEN:
-        admin_token = secrets.token_urlsafe(24)
-        generated = True
+    if "ADMIN_TOKEN" not in env or not env["ADMIN_TOKEN"]:
+        admin_token = "vpn"
+        generated = False
+        print("ADMIN_TOKEN not set, defaulting to 'vpn'", flush=True)
+    else:
+        admin_token = env["ADMIN_TOKEN"]
+        generated = False
+        if len(admin_token) < MIN_ADMIN_TOKEN_LEN:
+            admin_token = secrets.token_urlsafe(24)
+            generated = True
     return {
         "port": int(env.get("PORT", "8080")),
         "mixed_port": int(env.get("MIXED_PORT", "40000")),

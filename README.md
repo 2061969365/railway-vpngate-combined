@@ -23,7 +23,7 @@ VPNGate 免费节点（sing-box `openvpn-client`，免 TUN/免特权）+ 双 VLE
     - `PROXY_USER` / `PROXY_PASS`（可选；不填则每次启动自动生成随机值。
       走 VLESS+tunnel 时用不到；只有直连 SOCKS5 调试时才需要。
       显式填写的话 `PROXY_PASS` 须 ≥ 16 位，否则拒绝启动）
-   - `ADMIN_TOKEN`（≥ 16 位，用于 `/ui` + `/api`）
+    - `ADMIN_TOKEN`（可选；不填则默认为 `vpn`，`/ui` 顶栏输入 `vpn` 点 Save 即可）
    - `TUNNEL_TOKEN`（Cloudflare tunnel token；缺失则 tunnel 软跳过，
      代理本身照常工作，`status["tunnel"] == "no-token"`）
    - 可选：`VLESS_UUID`（默认与 combined 一致）、`NEZHA_SERVER`/`NEZHA_KEY`、
@@ -41,6 +41,11 @@ ingress 规则在 Cloudflare Dashboard 的 tunnel 配置里加：
 
 - `node.example.com` + Path `/ws-node` → `http://localhost:8080`
 - `chain.example.com` + Path `/ws-chain` → `http://localhost:8082`
+- 管理页（同一域名后面加路径即可，不用独立子域名）：
+  - 同一 hostname + Path `/ui*` → `http://localhost:3000`
+  - 同一 hostname + Path `/api*` → `http://localhost:3000`
+  - （`/ui` 页面的数据请求走相对路径 `api/…`，所以 `/api*` 必须一起映射，
+    否则页面能打开但数据出不来；`/healthz` 可按需再加一条）
 
 （同一 hostname 配两个 path 也可。）本地都是明文 `http://`，
 TLS 由 Cloudflare 边缘终结。

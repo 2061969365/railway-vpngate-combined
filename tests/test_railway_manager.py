@@ -530,6 +530,18 @@ class EnvValidationTests(unittest.TestCase):
 
         self.assertEqual(30, config["real_topk"])
 
+    def test_missing_admin_token_defaults_to_vpn(self) -> None:
+        env = {"PORT": "8080", "PROXY_USER": "u", "PROXY_PASS": "0123456789abcdef"}
+        config = build_config_from_env(env)
+
+        self.assertEqual("vpn", config["admin_token"])
+        self.assertFalse(config["admin_token_generated"])
+
+    def test_explicit_admin_token_is_kept(self) -> None:
+        config = build_config_from_env(self._env(ADMIN_TOKEN="my-own-admin-token-0123456789"))
+
+        self.assertEqual("my-own-admin-token-0123456789", config["admin_token"])
+
     def test_default_fetch_rejects_plain_http(self) -> None:
         with self.assertRaises(ValueError):
             default_fetch("http://example.com/x.csv", timeout=1)
