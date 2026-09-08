@@ -289,29 +289,31 @@ jobs:
         run: docker build -f Dockerfile -t combined-railway:test .
       - name: Smoke test (boot + routes, no TUN)
         run: |
-          docker run -d --name combined-test -p 8080:8080 \
-            -e PORT=8080 -e PROXY_USER=u -e PROXY_PASS=0123456789abcdef \
+          # PORT=3000: start.sh always enables VLESS (default UUID), so $PORT
+          # must avoid the fixed 8080/8081/8082/4096 ports (same rule as README).
+          docker run -d --name combined-test -p 3000:3000 -p 8080:8080 -p 8082:8082 \
+            -e PORT=3000 -e PROXY_USER=u -e PROXY_PASS=0123456789abcdef \
             -e ADMIN_TOKEN=smoke-admin-token-0123456789 \
             -e REAL_TOPK=0 \
             combined-railway:test
           for i in $(seq 1 18); do
-            if curl -m 5 -s http://127.0.0.1:8080/healthz | grep -q "^ok$"; then
+            if curl -m 5 -s http://127.0.0.1:3000/healthz | grep -q "^ok$"; then
               echo "healthz OK after ~$((i * 10))s"
               break
             fi
             sleep 10
           done
-          curl -m 10 -s http://127.0.0.1:8080/healthz | grep -q "^ok$" || {
+          curl -m 10 -s http://127.0.0.1:3000/healthz | grep -q "^ok$" || {
             echo "healthz never OK; container log tail:"; docker logs combined-test 2>&1 | tail -n 30; exit 1; }
-          curl -m 10 -s http://127.0.0.1:8080/ui | grep -q "api/status"
-          code=$(curl -m 10 -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/api/status)
+          curl -m 10 -s http://127.0.0.1:3000/ui | grep -q "api/status"
+          code=$(curl -m 10 -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/api/status)
           if [ "$code" = "401" ]; then
             echo "unauthenticated /api/status correctly rejected"
           else
             echo "expected 401 without token, got $code"; exit 1
           fi
           curl -m 10 -s -H "Authorization: Bearer smoke-admin-token-0123456789" \
-            http://127.0.0.1:8080/api/status | tee /tmp/smoke-status.json | python3 -m json.tool
+            http://127.0.0.1:3000/api/status | tee /tmp/smoke-status.json | python3 -m json.tool
           python3 - <<'EOF'
           import json
           status = json.load(open("/tmp/smoke-status.json"))
@@ -325,7 +327,7 @@ jobs:
           curl -m 10 -s http://127.0.0.1:8081/ -o /dev/null -w "disguise page: %{http_code}\n"
           curl -m 10 -s http://127.0.0.1:4096/health -o /dev/null -w "cc-switch: %{http_code}\n"
           curl -m 10 -s -X POST -H "Authorization: Bearer smoke-admin-token-0123456789" \
-            http://127.0.0.1:8080/api/switch -d '{"tag":"auto"}' | grep -q '"ok": true'
+            http://127.0.0.1:3000/api/switch -d '{"tag":"auto"}' | grep -q '"ok": true'
           echo "switch-to-auto OK"
           echo "--- container log tail ---"
           docker logs combined-test 2>&1 | tail -n 10

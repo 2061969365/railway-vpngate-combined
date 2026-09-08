@@ -37,6 +37,11 @@ class TrialRunJobTests(unittest.TestCase):
         self.assertIn("8082", self.text)
         self.assertIn("DIRECT_IP", self.text)
 
+    def test_smoke_uses_non_colliding_port(self) -> None:
+        # start.sh always enables VLESS (default UUID), so $PORT must avoid
+        # the fixed 8080/8081/8082/4096 ports or sing-box fails to bind.
+        self.assertIn("-e PORT=3000", self.text)
+
     def test_no_railway_deploy_job(self) -> None:
         self.assertNotIn("deploy-railway:", self.text)
 
