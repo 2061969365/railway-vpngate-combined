@@ -35,6 +35,10 @@ _term() {
 trap _term TERM INT
 
 # === 3. vpngate manager: owns $PORT, supervises sing-box + cloudflared ===
+# Manager serves the disguise page itself at GET / (file already has the
+# UUID/remark injected above), so the tunnel catch-all /* -> $PORT keeps
+# the disguise at the domain root with no extra route.
+export DISGUISE_PATH="/app/www/index.html"
 echo "[init] starting railway_manager (owns \$PORT=$PORT)..."
 python railway_manager.py &
 MANAGER_PID=$!

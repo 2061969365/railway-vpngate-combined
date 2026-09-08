@@ -238,6 +238,7 @@ def build_config_from_env(env: dict) -> dict:
         "vless_chain_port": int(env.get("VLESS_CHAIN_PORT", "8082")),
         "tunnel_token": env.get("TUNNEL_TOKEN", ""),
         "cloudflared_bin": env.get("CLOUDFLARED_BIN", "cloudflared"),
+        "disguise_path": env.get("DISGUISE_PATH", ""),
     }
 
 
@@ -297,6 +298,7 @@ class RailwayManager:
         vless_chain_port: int = 8082,
         tunnel_token: str = "",
         cloudflared_bin: str = "cloudflared",
+        disguise_path: str = "",
         config_path: str = "singbox-railway.json",
         nodes_path: str = "nodes.json",
         state_path: str = "state.json",
@@ -334,6 +336,7 @@ class RailwayManager:
         self.vless_chain_port = vless_chain_port
         self.tunnel_token = tunnel_token
         self.cloudflared_bin = cloudflared_bin
+        self.disguise_path = disguise_path
         self._cloudflared_proc: subprocess.Popen | None = None
         self.preferred_tag: str | None = None
         self._nodes: list[dict] = []
@@ -480,7 +483,16 @@ class RailwayManager:
                 client.sendall(_http_response("503 Service Unavailable",
                                               "text/plain", b"not ready"))
             return
-        if path in ("/", "/ui") and method == "GET":
+        if path == "/" and method == "GET":
+            body = self._disguise_body()
+            if body is not None:
+                client.sendall(_http_response("200 OK", "text/html; charset=utf-8",
+                                              body))
+            else:
+                client.sendall(_http_response("200 OK", "text/html; charset=utf-8",
+                                              UI_HTML.encode()))
+            return
+        if path == "/ui" and method == "GET":
             client.sendall(_http_response("200 OK", "text/html; charset=utf-8",
                                           UI_HTML.encode()))
             return
@@ -520,6 +532,16 @@ class RailwayManager:
                                           b"method not allowed"))
         else:
             client.sendall(_http_response("404 Not Found", "text/plain", b"not found"))
+
+    def _disguise_body(self) -> bytes | None:
+        """Disguise page bytes for GET /, or None to fall back to the console."""
+        if not self.disguise_path:
+            return None
+        try:
+            with open(self.disguise_path, "rb") as handle:
+                return handle.read()
+        except OSError:
+            return None
 
     def _healthy(self) -> bool:
         with self._lock:
@@ -1092,6 +1114,7 @@ def main() -> int:
         vless_chain_port=cfg["vless_chain_port"],
         tunnel_token=cfg["tunnel_token"],
         cloudflared_bin=cfg["cloudflared_bin"],
+        disguise_path=cfg["disguise_path"],
         config_path=os.path.join(data_dir, "singbox-railway.json"),
         nodes_path=os.path.join(data_dir, "nodes.json"),
         state_path=os.path.join(data_dir, "state.json"),

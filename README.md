@@ -43,9 +43,11 @@ ingress 规则在 Cloudflare Dashboard 的 tunnel 配置里加：
 - 同一 hostname + Path `/ws-chain*` → `http://localhost:8082`
 - 同一 hostname + Path `/*` → `http://localhost:3000`（兜底，必须排在上面两条**之后**）
 
-顺序即优先级：`/ws-node`、`/ws-chain` 先命中走 sing-box，其余一切
-（`/ui`、`/api/*`、`/healthz`）都落到 3000 的 manager。这样管理页只用加
-**一条**规则，`/ui` 的壳和 `/api` 的数据请求就都通了。
+顺序即优先级：`/ws-node`、`/ws-chain` 先命中走 sing-box，其余一切都落到
+3000 的 manager。manager 的根路径 `/` 直接 serve 伪装页文件（`start.sh`
+注入 UUID 后经 `DISGUISE_PATH` 接线），所以域名根打开就是伪装页，
+`?mirror` 进节点面板；`/ui` 是管理控制台（token 默认为 `vpn`）；
+`/api/*` 是面板的数据接口。三条规则一次配完，不用再为伪装页加端口。
 
 （同一 hostname 配两个 path 也可。）本地都是明文 `http://`，
 TLS 由 Cloudflare 边缘终结。

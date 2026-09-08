@@ -165,6 +165,81 @@ class MultiplexerTests(unittest.TestCase):
         self.assertEqual(b"", data)
 
 
+class DisguiseRootTests(unittest.TestCase):
+    MARKER = "<!-- disguise-page-marker -->"
+
+    def _manager(self, disguise_path: str) -> RailwayManager:
+        return RailwayManager(
+            port=0, mixed_port=get_free_port(),
+            start_singbox=False, auto_refresh=False, fetch_on_start=False,
+            disguise_path=disguise_path,
+        )
+
+    def _get_root(self, manager: RailwayManager, port: int) -> bytes:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+        with sock:
+            sock.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        return response
+
+    def test_root_serves_disguise_file(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False,
+                                         encoding="utf-8") as handle:
+            handle.write(f"<html><body>{self.MARKER}</body></html>")
+            path = handle.name
+        manager = self._manager(path)
+        port = manager.start()
+        try:
+            response = self._get_root(manager, port)
+        finally:
+            manager.stop()
+            os.unlink(path)
+
+        self.assertIn(b"200 OK", response)
+        self.assertIn(self.MARKER.encode(), response)
+        self.assertNotIn(b"/api/status", response)
+
+    def test_root_falls_back_to_console_without_disguise_file(self) -> None:
+        manager = self._manager("/nonexistent/disguise.html")
+        port = manager.start()
+        try:
+            response = self._get_root(manager, port)
+        finally:
+            manager.stop()
+
+        self.assertIn(b"200 OK", response)
+        self.assertIn(b"/api/status", response)
+
+    def test_ui_still_serves_console_when_disguise_set(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".html", delete=False,
+                                         encoding="utf-8") as handle:
+            handle.write(f"<html><body>{self.MARKER}</body></html>")
+            path = handle.name
+        manager = self._manager(path)
+        port = manager.start()
+        try:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=5)
+            with sock:
+                sock.sendall(b"GET /ui HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                response = b""
+                while True:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    response += chunk
+        finally:
+            manager.stop()
+            os.unlink(path)
+
+        self.assertIn(b"200 OK", response)
+        self.assertIn(b"/api/status", response)
+
+
 class RefreshTests(unittest.TestCase):
     def _manager(self, **kwargs):
         defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
@@ -541,6 +616,16 @@ class EnvValidationTests(unittest.TestCase):
         config = build_config_from_env(self._env(ADMIN_TOKEN="my-own-admin-token-0123456789"))
 
         self.assertEqual("my-own-admin-token-0123456789", config["admin_token"])
+
+    def test_disguise_path_defaults_to_empty(self) -> None:
+        config = build_config_from_env(self._env())
+
+        self.assertEqual("", config["disguise_path"])
+
+    def test_disguise_path_passthrough(self) -> None:
+        config = build_config_from_env(self._env(DISGUISE_PATH="/app/www/index.html"))
+
+        self.assertEqual("/app/www/index.html", config["disguise_path"])
 
     def test_default_fetch_rejects_plain_http(self) -> None:
         with self.assertRaises(ValueError):
