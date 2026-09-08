@@ -20,15 +20,17 @@ VPNGate 免费节点（sing-box `openvpn-client`，免 TUN/免特权）+ 双 VLE
 1. 新建 Service，指向本仓库，Region 建议新加坡（离 VPNGate 亚洲节点近）。
 2. Variables（必填）：
    - `PORT=3000`（固定端口，避开 8080/8081/8082/4096）
-    - `PROXY_USER` / `PROXY_PASS`（可选；不填则每次启动自动生成随机值。
-      走 VLESS+tunnel 时用不到；只有直连 SOCKS5 调试时才需要。
-      显式填写的话 `PROXY_PASS` 须 ≥ 16 位，否则拒绝启动）
-    - `ADMIN_TOKEN`（可选；不填则默认为 `vpn`，`/ui` 顶栏输入 `vpn` 点 Save 即可）
+     - `PROXY_USER`（默认 `u`）/ `PROXY_PASS`（可选；不填则每次启动自动生成随机 `PROXY_PASS`，
+       `PROXY_USER` 保持 `u`。走 VLESS+tunnel 时用不到；只有直连 SOCKS5 调试时才需要。
+       显式填写的话 `PROXY_PASS` 须 ≥ 16 位，否则拒绝启动）
+     - `ADMIN_TOKEN`（可选；不填则默认为 `vpn`，`/ui` 登录门输入 `vpn` 即可进入；
+       若显式填写且长度 < 16 位，会被静默替换为随机值并在日志打印）
    - `TUNNEL_TOKEN`（Cloudflare tunnel token；缺失则 tunnel 软跳过，
      代理本身照常工作，`status["tunnel"] == "no-token"`）
-    - 可选：`VLESS_UUID`（默认与 combined 一致）、`NEZHA_SERVER`/`NEZHA_KEY`、
-      `LIMIT`（默认 0=全量）、`REAL_TOPK`（默认 30）、`DIAL_WORKERS`（默认 10，
-      真测并发；1GB 内存够用，OOM 就往小调）
+     - 可选：`VLESS_UUID`（默认与 combined 一致；`VLESS_UUID` 为空则不注册 VLESS 入站，
+       直接 `python railway_manager.py` 会无 VLESS）、`NEZHA_SERVER`/`NEZHA_KEY`、
+       `LIMIT`（默认 0=全量）、`REAL_TOPK`（默认 30）、`DIAL_WORKERS`（默认 10，
+       真测并发；1GB 内存够用，OOM 就往小调）
 3. 健康检查：`/` 路径填 `/healthz`（部署时需 200，冷启动靠 last-good 秒回）。
 4. 另加一个 TCP Proxy 指向内部 `3000` 端口（可选，给 SOCKS5 用）。
 5. 持久化（强烈建议）：service → Volumes → Add Volume，加完即可，
@@ -49,10 +51,10 @@ ingress 规则在 Cloudflare Dashboard 的 tunnel 配置里加：
 - 同一 hostname + Path `/*` → `http://localhost:3000`（兜底，必须排在上面两条**之后**）
 
 顺序即优先级：`/ws-node`、`/ws-chain` 先命中走 sing-box，其余一切都落到
-3000 的 manager。manager 的根路径 `/` 直接 serve 伪装页文件（`start.sh`
-注入 UUID 后经 `DISGUISE_PATH` 接线），所以域名根打开就是伪装页，
-`?mirror` 进节点面板；`/ui` 是管理控制台（token 默认为 `vpn`）；
-`/api/*` 是面板的数据接口。三条规则一次配完，不用再为伪装页加端口。
+3000 的 manager。manager 剥离 query 后路由：`/ui` 进控制台登录门，
+`/api/*` 为数据接口（需 Bearer token），`/` 直接 serve 伪装页文件
+（`start.sh` 注入 UUID 后经 `DISGUISE_PATH` 接线，`start.sh` 幂等，
+容器重启不会残留旧值），其余路径 404。三条规则一次配完，不用再为伪装页加端口。
 
 （同一 hostname 配两个 path 也可。）本地都是明文 `http://`，
 TLS 由 Cloudflare 边缘终结。

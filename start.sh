@@ -11,18 +11,22 @@ echo "[init] VLESS UUID: $VLESS_UUID"
 
 # === 2. Dynamic IP / geo remark for the disguise page ===
 echo "[init] probing egress IP..."
-REAL_IP=$(curl -s --max-time 3 ifconfig.me || true)
-REAL_COUNTRY=$(curl -s --max-time 3 ipinfo.io/country || true)
+REAL_IP=$(curl -s --max-time 3 --retry 1 ifconfig.me || true)
+REAL_COUNTRY=$(curl -s --max-time 3 --retry 1 ipinfo.io/country || true)
 [ -z "$REAL_IP" ] && REAL_IP="DynamicIP"
 [ -z "$REAL_COUNTRY" ] && REAL_COUNTRY="Cloud"
 NODE_REMARK="${REAL_COUNTRY}_${REAL_IP}"
 echo "[init] node remark: $NODE_REMARK"
 
-cp /app/www/index.html /tmp/index.html 2>/dev/null || true
-if [ -f /tmp/index.html ]; then
-  sed -i "s/UUID_PLACEHOLDER/$VLESS_UUID/g" /tmp/index.html
-  sed -i "s/NODE_REMARK_PLACEHOLDER/$NODE_REMARK/g" /tmp/index.html
-  cp /tmp/index.html /app/www/index.html
+if grep -q "UUID_PLACEHOLDER" /app/www/index.html 2>/dev/null; then
+  cp /app/www/index.html /tmp/index.html 2>/dev/null || true
+  if [ -f /tmp/index.html ]; then
+    esc_uuid=$(printf '%s' "$VLESS_UUID" | sed 's/[&/\]/\\&/g')
+    esc_remark=$(printf '%s' "$NODE_REMARK" | sed 's/[&/\]/\\&/g')
+    sed -i "s/UUID_PLACEHOLDER/$esc_uuid/g" /tmp/index.html
+    sed -i "s/NODE_REMARK_PLACEHOLDER/$esc_remark/g" /tmp/index.html
+    cp /tmp/index.html /app/www/index.html
+  fi
 fi
 
 _term() {

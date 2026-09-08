@@ -1143,20 +1143,28 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
         }
 
         function copyText(elementId, btn) {
-            const text = document.getElementById(elementId).innerText;
+            const text = document.getElementById(elementId).innerText.trim();
+            if (!text || text.includes('生成中')) {
+                realToast('链接还没生成好，请稍后再试');
+                return;
+            }
             navigator.clipboard.writeText(text).then(() => {
                 flashButton(btn);
                 realToast('已成功复制到剪贴板！');
-            });
+            }).catch(() => realToast('复制失败，请手动选择复制'));
         }
 
         function copyBoth(btn) {
-            const direct = document.getElementById('nodeLink').innerText;
-            const chain = document.getElementById('nodeLinkChain').innerText;
+            const direct = document.getElementById('nodeLink').innerText.trim();
+            const chain = document.getElementById('nodeLinkChain').innerText.trim();
+            if (!direct || !chain || direct.includes('生成中') || chain.includes('生成中')) {
+                realToast('链接还没生成好，请稍后再试');
+                return;
+            }
             navigator.clipboard.writeText(direct + "\n" + chain).then(() => {
                 flashButton(btn, '✓ 两个链接已复制');
                 realToast('直连 + 链式两个链接已复制！');
-            });
+            }).catch(() => realToast('复制失败，请手动选择复制'));
         }
     
 </script>

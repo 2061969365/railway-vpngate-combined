@@ -58,6 +58,12 @@ class DisguiseGlassTests(unittest.TestCase):
         self.assertIn('id="fakePage"', self.text)
         self.assertIn("三体", self.text)
 
+    def test_copy_handles_clipboard_denied(self) -> None:
+        self.assertIn(".catch(", self.text)
+
+    def test_copy_validates_not_generating(self) -> None:
+        self.assertIn("生成中", self.text)
+
     def test_preferred_source_bestcfip(self) -> None:
         self.assertIn("joname1/BestCFip", self.text)
         self.assertIn("ipv4.txt", self.text)
