@@ -37,6 +37,14 @@ class TrialRunJobTests(unittest.TestCase):
         self.assertIn("8082", self.text)
         self.assertIn("DIRECT_IP", self.text)
 
+    def test_ws_upgrade_check_tolerates_hanging_connection(self) -> None:
+        # sing-box answers 101 then waits for the VLESS payload, so curl
+        # always times out (exit 28) even on success; under `bash -e` that
+        # would kill the step before the 101 assertion runs.
+        start = self.text.index("ws_code() {")
+        block = self.text[start:start + 800]
+        self.assertIn("|| true", block)
+
     def test_smoke_uses_non_colliding_port(self) -> None:
         # start.sh always enables VLESS (default UUID), so $PORT must avoid
         # the fixed 8080/8081/8082/4096 ports or sing-box fails to bind.

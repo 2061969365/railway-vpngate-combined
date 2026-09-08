@@ -396,11 +396,14 @@ jobs:
       - name: Verify VLESS+WS inbounds answer upgrade on both paths
         run: |
           ws_code() {
+            # NOTE: sing-box answers 101 then waits for the VLESS payload,
+            # so curl always hits -m timeout (exit 28) even on success.
+            # The 101 in %{http_code} is the assertion; ignore exit status.
             curl -m 10 -s -o /dev/null -w "%{http_code}" \
               -H "Connection: Upgrade" -H "Upgrade: websocket" \
               -H "Sec-WebSocket-Version: 13" \
               -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-              "http://127.0.0.1:$1$2"
+              "http://127.0.0.1:$1$2" || true
           }
           NODE_CODE=$(ws_code 8080 /ws-node)
           CHAIN_CODE=$(ws_code 8082 /ws-chain)
