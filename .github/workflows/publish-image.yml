@@ -3,7 +3,6 @@ name: Publish image to GHCR
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
@@ -27,9 +26,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=sha,format=short
-            type=ref,event=tag
+            type=raw,value=latest
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
