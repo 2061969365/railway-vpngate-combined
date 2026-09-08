@@ -39,13 +39,13 @@ VPNGate 免费节点（sing-box `openvpn-client`，免 TUN/免特权）+ 双 VLE
 tunnel 只管把外网域名打到容器端口，token 方式运行，
 ingress 规则在 Cloudflare Dashboard 的 tunnel 配置里加：
 
-- `node.example.com` + Path `/ws-node` → `http://localhost:8080`
-- `chain.example.com` + Path `/ws-chain` → `http://localhost:8082`
-- 管理页（同一域名后面加路径即可，不用独立子域名）：
-  - 同一 hostname + Path `/ui*` → `http://localhost:3000`
-  - 同一 hostname + Path `/api*` → `http://localhost:3000`
-  - （`/ui` 页面的数据请求走相对路径 `api/…`，所以 `/api*` 必须一起映射，
-    否则页面能打开但数据出不来；`/healthz` 可按需再加一条）
+- `node.example.com` + Path `/ws-node*` → `http://localhost:8080`
+- 同一 hostname + Path `/ws-chain*` → `http://localhost:8082`
+- 同一 hostname + Path `/*` → `http://localhost:3000`（兜底，必须排在上面两条**之后**）
+
+顺序即优先级：`/ws-node`、`/ws-chain` 先命中走 sing-box，其余一切
+（`/ui`、`/api/*`、`/healthz`）都落到 3000 的 manager。这样管理页只用加
+**一条**规则，`/ui` 的壳和 `/api` 的数据请求就都通了。
 
 （同一 hostname 配两个 path 也可。）本地都是明文 `http://`，
 TLS 由 Cloudflare 边缘终结。
