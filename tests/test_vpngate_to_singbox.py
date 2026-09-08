@@ -1,0 +1,747 @@
+"""Tests for minimal VPNGate .ovpn -> sing-box openvpn-client converter."""
+import base64
+import socket
+import ssl
+import threading
+import unittest
+from pathlib import Path
+
+from vpngate_to_singbox import (
+    build_singbox_config,
+    nodes_to_endpoints,
+    ovpn_to_endpoint,
+    probe_tcp_latency,
+    snapshot_to_endpoints,
+    snapshot_to_nodes,
+)
+
+FIXTURE_DIR = Path(__file__).resolve().parent / "fixtures"
+TLS_CERT = str(FIXTURE_DIR / "tls-localhost.crt")
+TLS_KEY = str(FIXTURE_DIR / "tls-localhost.key")
+
+
+TCP_OVPN = """\
+client
+dev tun
+proto tcp-client
+remote 203.0.113.1 443 tcp
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+cipher AES-128-CBC
+auth SHA1
+auth-user-pass
+<ca>
+-----BEGIN CERTIFICATE-----
+Q0E=
+-----END CERTIFICATE-----
+</ca>
+<cert>
+-----BEGIN CERTIFICATE-----
+Q0VSVA==
+-----END CERTIFICATE-----
+</cert>
+<key>
+-----BEGIN PRIVATE KEY-----
+S0VZ
+-----END PRIVATE KEY-----
+</key>
+"""
+
+UDP_ONLY_OVPN = """\
+client
+dev tun
+proto udp
+remote 198.51.100.7 1194 udp
+<ca>
+Q0E=
+</ca>
+"""
+
+
+class ConvertTcpTests(unittest.TestCase):
+    def test_tcp_config_converts_to_openvpn_client_endpoint(self) -> None:
+        ep = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+
+        self.assertEqual("openvpn-client", ep["type"])
+        self.assertEqual("vpngate-0", ep["tag"])
+        self.assertEqual("203.0.113.1", ep["server"])
+        self.assertEqual(443, ep["server_port"])
+        self.assertEqual("tcp", ep["network"])
+        self.assertFalse(ep["system"])
+        self.assertEqual("vpn", ep["username"])
+        self.assertEqual("vpn", ep["password"])
+        self.assertIn("BF-CBC", ep["data_ciphers"])
+        self.assertIn("AES-128-CBC", ep["data_ciphers"])
+        self.assertEqual("SHA1", ep["auth"])
+        self.assertIn("BEGIN CERTIFICATE", ep["tls"]["certificate"])
+
+    def test_udp_only_config_raises(self) -> None:
+        with self.assertRaises(ValueError):
+            ovpn_to_endpoint(UDP_ONLY_OVPN, tag="vpngate-x")
+
+
+def _b64(text: str) -> str:
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def _snapshot_row(host: str, ip: str, speed: int, config_b64: str) -> str:
+    return f"{host},{ip},100,20,{speed},Japan,JP,1,{config_b64}"
+
+
+def _snapshot_row_country(host: str, ip: str, speed: int, config_b64: str,
+                          country_long: str, country_short: str) -> str:
+    return f"{host},{ip},100,20,{speed},{country_long},{country_short},1,{config_b64}"
+
+
+CSV_HEADER = "#HostName,IP,Score,Ping,Speed,CountryLong,CountryShort,NumVpnSessions,OpenVPN_ConfigData_Base64"
+
+
+class ProbeTcpLatencyTests(unittest.TestCase):
+    def test_closed_port_returns_zero(self) -> None:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        free_port = sock.getsockname()[1]
+        sock.close()
+
+        self.assertEqual(0, probe_tcp_latency("127.0.0.1", free_port, timeout=2))
+
+    def test_listening_port_returns_positive_ms(self) -> None:
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+        stop = threading.Event()
+
+        def _accept() -> None:
+            listener.settimeout(5)
+            try:
+                while not stop.is_set():
+                    try:
+                        conn, _ = listener.accept()
+                        conn.close()
+                    except socket.timeout:
+                        continue
+            except OSError:
+                pass
+
+        worker = threading.Thread(target=_accept, daemon=True)
+        worker.start()
+        try:
+            latency = probe_tcp_latency("127.0.0.1", port, timeout=5)
+        finally:
+            stop.set()
+            listener.close()
+
+        self.assertGreater(latency, 0)
+
+
+class SnapshotToNodesTests(unittest.TestCase):
+    def _csv(self) -> str:
+        return "\n".join([
+            CSV_HEADER,
+            _snapshot_row_country("vpn-jp-slow", "203.0.113.11", 1000,
+                                  _b64(TCP_OVPN.replace("203.0.113.1", "203.0.113.11")),
+                                  "Japan", "JP"),
+            _snapshot_row_country("vpn-us-fast", "203.0.113.12", 500,
+                                  _b64(TCP_OVPN.replace("203.0.113.1", "203.0.113.12")),
+                                  "United States", "US"),
+            # UDP-only row must be skipped even though its Speed is highest.
+            _snapshot_row_country("vpn-udp", "198.51.100.99", 999999,
+                                  _b64(UDP_ONLY_OVPN), "Japan", "JP"),
+            _snapshot_row_country("vpn-broken", "203.0.113.13", 8000,
+                                  "!!!not-base64!!!", "Japan", "JP"),
+            "*vpn_servers",
+            "# 123",
+        ]) + "\n"
+
+    def test_nodes_carry_country_and_latency_sorted_by_latency(self) -> None:
+        latencies = {"203.0.113.11": 900, "203.0.113.12": 100}
+
+        nodes = snapshot_to_nodes(
+            self._csv(), probe_fn=lambda host, port: latencies[host])
+
+        self.assertEqual(2, len(nodes))
+        # sorted by measured latency, not by Speed
+        self.assertEqual("203.0.113.12", nodes[0]["server"])
+        self.assertEqual("US", nodes[0]["country_short"])
+        self.assertEqual("United States", nodes[0]["country"])
+        self.assertEqual(100, nodes[0]["latency_ms"])
+        self.assertEqual(500, nodes[0]["speed"])
+        self.assertEqual("JP", nodes[1]["country_short"])
+
+    def test_unreachable_probe_result_is_filtered_out(self) -> None:
+        nodes = snapshot_to_nodes(self._csv(), probe_fn=lambda host, port: 0)
+
+        self.assertEqual([], nodes)
+
+    def test_probe_disabled_falls_back_to_speed_rank(self) -> None:
+        nodes = snapshot_to_nodes(self._csv(), probe=False)
+
+        self.assertEqual(2, len(nodes))
+        self.assertEqual("203.0.113.11", nodes[0]["server"])
+        self.assertIsNone(nodes[0]["latency_ms"])
+
+
+class NodesToEndpointsTests(unittest.TestCase):
+    def test_endpoint_dict_has_no_extra_metadata_keys(self) -> None:
+        nodes = snapshot_to_nodes(
+            "\n".join([
+                CSV_HEADER,
+                _snapshot_row_country("vpn-jp", "203.0.113.11", 1000,
+                                      _b64(TCP_OVPN.replace("203.0.113.1", "203.0.113.11")),
+                                      "Japan", "JP"),
+            ]) + "\n",
+            probe_fn=lambda host, port: 50,
+        )
+
+        endpoints = nodes_to_endpoints(nodes, tag_prefix="vpngate")
+
+        self.assertEqual(1, len(endpoints))
+        self.assertEqual("vpngate-0", endpoints[0]["tag"])
+        self.assertNotIn("country", endpoints[0])
+        self.assertNotIn("country_short", endpoints[0])
+        self.assertNotIn("latency_ms", endpoints[0])
+        self.assertNotIn("speed", endpoints[0])
+
+
+class FailoverConfigTests(unittest.TestCase):
+    def test_urltest_is_vpn_only_and_tuned_params(self) -> None:
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+        cfg = build_singbox_config([endpoint], final="auto")
+
+        self.assertEqual("auto", cfg["route"]["final"])
+        urltest = next(o for o in cfg["outbounds"] if o["type"] == "urltest")
+        # direct must NOT be in the auto urltest group: it always wins on
+        # speed and would silently route all serving traffic around the VPN.
+        self.assertNotIn("direct", urltest["outbounds"])
+        self.assertIn("vpngate-0", urltest["outbounds"])
+        self.assertEqual("1m", urltest["interval"])
+        self.assertEqual(800, urltest["tolerance"])
+
+    def test_direct_remains_in_manual_selector_as_explicit_fallback(self) -> None:
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+        cfg = build_singbox_config([endpoint], final="auto")
+
+        selector = next(o for o in cfg["outbounds"] if o["type"] == "selector")
+        self.assertEqual(["vpngate-0", "direct"], selector["outbounds"])
+
+    def test_default_final_is_auto(self) -> None:
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+        cfg = build_singbox_config([endpoint])
+
+        self.assertEqual("auto", cfg["route"]["final"])
+
+
+class SnapshotToEndpointsTests(unittest.TestCase):
+    def test_tcp_rows_convert_udp_and_broken_skipped_ranked_by_speed(self) -> None:
+        slow_tcp = TCP_OVPN.replace("203.0.113.1", "203.0.113.11")
+        fast_tcp = TCP_OVPN.replace("203.0.113.1", "203.0.113.12")
+        csv_text = "\n".join(
+            [
+                "#HostName,IP,Score,Ping,Speed,CountryLong,CountryShort,NumVpnSessions,OpenVPN_ConfigData_Base64",
+                # UDP row is fastest but must be skipped (no TCP remote)
+                _snapshot_row("vpn-udp", "198.51.100.99", 999999, _b64(UDP_ONLY_OVPN)),
+                _snapshot_row("vpn-slow", "203.0.113.11", 1000, _b64(slow_tcp)),
+                _snapshot_row("vpn-fast", "203.0.113.12", 5000, _b64(fast_tcp)),
+                _snapshot_row("vpn-broken", "203.0.113.13", 8000, "!!!not-base64!!!"),
+                "*vpn_servers",
+                "# 123",
+            ]
+        ) + "\n"
+
+        endpoints = snapshot_to_endpoints(csv_text, limit=8, tag_prefix="vpngate",
+                                            probe=False)
+
+        self.assertEqual(2, len(endpoints))
+        # ranked by Speed desc
+        self.assertEqual("203.0.113.12", endpoints[0]["server"])
+        self.assertEqual("203.0.113.11", endpoints[1]["server"])
+        self.assertEqual(["vpngate-0", "vpngate-1"], [ep["tag"] for ep in endpoints])
+        self.assertTrue(all(ep["network"] == "tcp" for ep in endpoints))
+
+    def test_limit_is_respected(self) -> None:
+        rows = [
+            _snapshot_row(f"vpn-{i}", f"203.0.113.{100 + i}", 1000 + i,
+                          _b64(TCP_OVPN.replace("203.0.113.1", f"203.0.113.{100 + i}")))
+            for i in range(5)
+        ]
+        csv_text = "#HostName,IP,Score,Ping,Speed,CountryLong,CountryShort,NumVpnSessions,OpenVPN_ConfigData_Base64\n" + "\n".join(rows) + "\n"
+
+        endpoints = snapshot_to_endpoints(csv_text, limit=2, probe=False)
+
+        self.assertEqual(2, len(endpoints))
+
+    def test_snapshot_without_usable_tcp_raises(self) -> None:
+        csv_text = (
+            "#HostName,IP,Score,Ping,Speed,CountryLong,CountryShort,NumVpnSessions,OpenVPN_ConfigData_Base64\n"
+            + _snapshot_row("vpn-udp", "198.51.100.99", 999999, _b64(UDP_ONLY_OVPN))
+            + "\n"
+        )
+
+        with self.assertRaises(ValueError):
+            snapshot_to_endpoints(csv_text, probe=False)
+
+
+class FakeSocks5Server:
+    """SOCKS5 server: no-auth + CONNECT, then TLS (like a real 443 target)."""
+
+    def __init__(self, status_code: int = 204) -> None:
+        self.status_code = status_code
+        self._tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        self._tls_context.load_cert_chain(TLS_CERT, TLS_KEY)
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self._listener.settimeout(5)
+        self.port = self._listener.getsockname()[1]
+        self._stop = threading.Event()
+
+    def start(self) -> None:
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            self._listener.close()
+        except OSError:
+            pass
+
+    def _recvn(self, conn: socket.socket, size: int) -> bytes:
+        data = b""
+        while len(data) < size:
+            chunk = conn.recv(size - len(data))
+            if not chunk:
+                raise OSError("eof")
+            data += chunk
+        return data
+
+    def _serve(self) -> None:
+        while not self._stop.is_set():
+            try:
+                conn, _ = self._listener.accept()
+            except OSError:
+                return
+            try:
+                conn.settimeout(5)
+                nmethods = self._recvn(conn, 2)[1]
+                self._recvn(conn, nmethods)
+                conn.sendall(b"\x05\x00")
+                header = self._recvn(conn, 4)
+                atyp = header[3]
+                if atyp == 1:
+                    self._recvn(conn, 6)
+                elif atyp == 3:
+                    self._recvn(conn, self._recvn(conn, 1)[0] + 2)
+                elif atyp == 4:
+                    self._recvn(conn, 18)
+                else:
+                    conn.close()
+                    continue
+                conn.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+                try:
+                    conn = self._tls_context.wrap_socket(conn, server_side=True)
+                except OSError:
+                    conn.close()
+                    continue
+                request = b""
+                while b"\r\n\r\n" not in request:
+                    chunk = conn.recv(4096)
+                    if not chunk:
+                        break
+                    request += chunk
+                conn.sendall(
+                    f"HTTP/1.1 {self.status_code} Test\r\nContent-Length: 0\r\n"
+                    f"Connection: close\r\n\r\n".encode()
+                )
+            except OSError:
+                pass
+            finally:
+                try:
+                    conn.close()
+                except OSError:
+                    pass
+
+
+class Socks5LatencyTests(unittest.TestCase):
+    def test_204_returns_positive_ms(self) -> None:
+        from vpngate_to_singbox import _socks5_get_latency_ms
+
+        server = FakeSocks5Server(status_code=204)
+        server.start()
+        try:
+            latency = _socks5_get_latency_ms(
+                "127.0.0.1", server.port, target_host="127.0.0.1",
+                target_port=server.port, timeout=5, cafile=TLS_CERT)
+        finally:
+            server.stop()
+
+        self.assertIsNotNone(latency)
+        self.assertGreaterEqual(latency, 1)
+
+    def test_non_204_returns_none(self) -> None:
+        from vpngate_to_singbox import _socks5_get_latency_ms
+
+        server = FakeSocks5Server(status_code=500)
+        server.start()
+        try:
+            latency = _socks5_get_latency_ms(
+                "127.0.0.1", server.port, target_host="127.0.0.1",
+                target_port=server.port, timeout=5, cafile=TLS_CERT)
+        finally:
+            server.stop()
+
+        self.assertIsNone(latency)
+
+    def test_refused_connection_returns_none(self) -> None:
+        from vpngate_to_singbox import _socks5_get_latency_ms
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        free_port = sock.getsockname()[1]
+        sock.close()
+
+        self.assertIsNone(_socks5_get_latency_ms("127.0.0.1", free_port, timeout=2))
+
+
+def _real_csv() -> str:
+    return "\n".join([
+        CSV_HEADER,
+        _snapshot_row_country("vpn-a", "203.0.113.21", 3000,
+                              _b64(TCP_OVPN.replace("203.0.113.1", "203.0.113.21")),
+                              "Japan", "JP"),
+        _snapshot_row_country("vpn-b", "203.0.113.22", 2000,
+                              _b64(TCP_OVPN.replace("203.0.113.1", "203.0.113.22")),
+                              "Japan", "JP"),
+        _snapshot_row_country("vpn-c", "203.0.113.23", 1000,
+                              _b64(TCP_OVPN.replace("203.0.113.1", "203.0.113.23")),
+                              "Japan", "JP"),
+    ]) + "\n"
+
+
+class RealTopKTests(unittest.TestCase):
+    def test_measured_first_then_unmeasured_by_handshake(self) -> None:
+        from vpngate_to_singbox import snapshot_to_nodes
+
+        handshakes = {"203.0.113.21": 300, "203.0.113.22": 100, "203.0.113.23": 200}
+        real = {"203.0.113.22": 500, "203.0.113.23": 50}
+
+        nodes = snapshot_to_nodes(
+            _real_csv(),
+            probe_fn=lambda host, port: handshakes[host],
+            real_topk=2,
+            dial_fn=lambda node: real.get(node["server"]),
+        )
+
+        self.assertEqual(["203.0.113.23", "203.0.113.22", "203.0.113.21"],
+                         [n["server"] for n in nodes])
+        self.assertEqual([50, 500, None],
+                         [n["real_latency_ms"] for n in nodes])
+
+    def test_real_topk_zero_never_dials(self) -> None:
+        from vpngate_to_singbox import snapshot_to_nodes
+
+        calls: list = []
+        nodes = snapshot_to_nodes(
+            _real_csv(),
+            probe_fn=lambda host, port: 100,
+            real_topk=0,
+            dial_fn=lambda node: calls.append(node["server"]) or 1,
+        )
+
+        self.assertEqual([], calls)
+        self.assertTrue(all(n["real_latency_ms"] is None for n in nodes))
+
+    def test_dial_exception_treated_as_unmeasured(self) -> None:
+        from vpngate_to_singbox import snapshot_to_nodes
+
+        def bad_dial(node):
+            if node["server"] == "203.0.113.22":
+                raise RuntimeError("tunnel down")
+            return 70
+
+        nodes = snapshot_to_nodes(
+            _real_csv(),
+            probe_fn=lambda host, port: 100,
+            real_topk=3,
+            dial_fn=bad_dial,
+        )
+
+        by_server = {n["server"]: n for n in nodes}
+        self.assertIsNone(by_server["203.0.113.22"]["real_latency_ms"])
+        self.assertEqual(70, by_server["203.0.113.21"]["real_latency_ms"])
+        # measured nodes rank before the failed one
+        self.assertLess(
+            [n["server"] for n in nodes].index("203.0.113.21"),
+            [n["server"] for n in nodes].index("203.0.113.22"),
+        )
+
+    def test_limit_zero_returns_all_nodes(self) -> None:
+        from vpngate_to_singbox import snapshot_to_nodes
+
+        rows = [
+            _snapshot_row(f"vpn-{i}", f"203.0.113.{100 + i}", 1000 + i,
+                          _b64(TCP_OVPN.replace("203.0.113.1", f"203.0.113.{100 + i}")))
+            for i in range(5)
+        ]
+        csv_text = CSV_HEADER + "\n" + "\n".join(rows) + "\n"
+
+        self.assertEqual(5, len(snapshot_to_nodes(csv_text, limit=0, probe=False)))
+
+    def test_default_limit_returns_all_nodes(self) -> None:
+        from vpngate_to_singbox import snapshot_to_nodes
+
+        rows = [
+            _snapshot_row(f"vpn-{i}", f"203.0.113.{100 + i}", 1000 + i,
+                          _b64(TCP_OVPN.replace("203.0.113.1", f"203.0.113.{100 + i}")))
+            for i in range(5)
+        ]
+        csv_text = CSV_HEADER + "\n" + "\n".join(rows) + "\n"
+
+        self.assertEqual(5, len(snapshot_to_nodes(csv_text, probe=False)))
+
+
+class MixedInboundTests(unittest.TestCase):
+    def test_mixed_inbound_included_when_requested(self) -> None:
+        from vpngate_to_singbox import build_singbox_config, ovpn_to_endpoint
+
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+        cfg = build_singbox_config([endpoint], mixed_listen="127.0.0.1", mixed_port=18080)
+
+        inbounds = cfg.get("inbounds", [])
+        self.assertEqual(1, len(inbounds))
+        self.assertEqual("mixed", inbounds[0]["type"])
+        self.assertEqual("127.0.0.1", inbounds[0]["listen"])
+        self.assertEqual(18080, inbounds[0]["listen_port"])
+
+    def test_no_inbound_by_default(self) -> None:
+        from vpngate_to_singbox import build_singbox_config, ovpn_to_endpoint
+
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+        cfg = build_singbox_config([endpoint])
+
+        self.assertNotIn("inbounds", cfg)
+
+
+class MeasureDiagnosticsTests(unittest.TestCase):
+    def test_dead_binary_returns_none_without_waiting_full_timeout(self) -> None:
+        import sys
+        import time
+        from vpngate_to_singbox import measure_real_latency, ovpn_to_endpoint
+
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="probe-0")
+        started = time.monotonic()
+        # python exits immediately on a bad script name: process dies fast,
+        # so measure must give up early instead of polling until deadline.
+        result = measure_real_latency(endpoint, singbox_bin=sys.executable,
+                                      timeout=30, poll_interval=1)
+        elapsed = time.monotonic() - started
+
+        self.assertIsNone(result)
+        self.assertLess(elapsed, 15)
+
+
+class MeasureReturnFirstTests(unittest.TestCase):
+    def test_first_successful_get_is_returned_without_second_call(self) -> None:
+        from unittest import mock
+        from vpngate_to_singbox import measure_real_latency, ovpn_to_endpoint
+
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="probe-0")
+        fake_proc = mock.Mock()
+        fake_proc.poll.return_value = None
+        with mock.patch("vpngate_to_singbox.subprocess.Popen",
+                        return_value=fake_proc), \
+             mock.patch("vpngate_to_singbox._socks5_get_latency_ms",
+                        side_effect=[118, None]) as probe:
+            result = measure_real_latency(endpoint, timeout=60, poll_interval=1)
+
+        # The readiness probe already completed a full HTTPS GET through the
+        # tunnel; a second timed GET only adds failure surface (e.g. a 2s
+        # budget when readiness arrives at 118s of a 120s deadline).
+        self.assertEqual(118, result)
+        self.assertEqual(1, probe.call_count)
+
+
+class DialProbeConfigTests(unittest.TestCase):
+    def test_final_pinned_to_probe_tag(self) -> None:
+        from vpngate_to_singbox import _dial_probe_config
+
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-3")
+        config = _dial_probe_config(endpoint, 41234)
+
+        self.assertEqual("dial-probe", config["route"]["final"])
+        self.assertEqual(["dial-probe"], [ep["tag"] for ep in config["endpoints"]])
+        self.assertEqual(41234, config["inbounds"][0]["listen_port"])
+
+    def test_serving_default_stays_on_auto(self) -> None:
+        from vpngate_to_singbox import build_singbox_config
+
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-3")
+        config = build_singbox_config([endpoint])
+
+        self.assertEqual("auto", config["route"]["final"])
+
+
+class ControlWrapTests(unittest.TestCase):
+    TLS_AUTH_OVPN = TCP_OVPN + """\
+key-direction 1
+<tls-auth>
+VE9LRU4=
+</tls-auth>
+"""
+
+    TLS_CRYPT_OVPN = TCP_OVPN + """\
+<tls-crypt>
+Q1JZUFRfS0VZ
+</tls-crypt>
+"""
+
+    def test_tls_auth_block_maps_to_control_wrap(self) -> None:
+        ep = ovpn_to_endpoint(self.TLS_AUTH_OVPN, tag="vpngate-ta")
+
+        self.assertEqual(
+            {"type": "tls_auth", "key": "VE9LRU4=", "direction": 1},
+            ep["tls"]["control_wrap"],
+        )
+
+    def test_tls_crypt_block_maps_to_control_wrap(self) -> None:
+        ep = ovpn_to_endpoint(self.TLS_CRYPT_OVPN, tag="vpngate-tc")
+
+        self.assertEqual(
+            {"type": "tls_crypt", "key": "Q1JZUFRfS0VZ"},
+            ep["tls"]["control_wrap"],
+        )
+
+
+class MultiRemoteTests(unittest.TestCase):
+    MULTI_TCP_OVPN = TCP_OVPN.replace(
+        "remote 203.0.113.1 443 tcp",
+        "remote 203.0.113.1 443 tcp\nremote 203.0.113.2 1194 tcp",
+    )
+
+    def test_multiple_tcp_remotes_become_servers_list(self) -> None:
+        from vpngate_to_singbox import primary_server
+
+        ep = ovpn_to_endpoint(self.MULTI_TCP_OVPN, tag="vpngate-multi")
+
+        self.assertNotIn("server", ep)
+        self.assertNotIn("server_port", ep)
+        self.assertEqual(
+            [
+                {"server": "203.0.113.1", "server_port": 443, "network": "tcp"},
+                {"server": "203.0.113.2", "server_port": 1194, "network": "tcp"},
+            ],
+            ep["servers"],
+        )
+        self.assertEqual(("203.0.113.1", 443), primary_server(ep))
+
+    def test_single_remote_keeps_singular_server_fields(self) -> None:
+        from vpngate_to_singbox import primary_server
+
+        ep = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+
+        self.assertEqual("203.0.113.1", ep["server"])
+        self.assertEqual(443, ep["server_port"])
+        self.assertNotIn("servers", ep)
+        self.assertEqual(("203.0.113.1", 443), primary_server(ep))
+
+    def test_remote_random_directive_is_preserved(self) -> None:
+        ep = ovpn_to_endpoint(self.MULTI_TCP_OVPN + "remote-random\n", tag="vpngate-rr")
+
+        self.assertTrue(ep["remote_random"])
+
+
+class ProbeFallbackTests(unittest.TestCase):
+    def _csv(self) -> str:
+        rows = [
+            _snapshot_row_country("vpn-a", "203.0.113.11", 3000,
+                                  _b64(TCP_OVPN.replace("203.0.113.1", "203.0.113.11")),
+                                  "Japan", "JP"),
+            _snapshot_row_country("vpn-b", "203.0.113.12", 2000,
+                                  _b64(TCP_OVPN.replace("203.0.113.1", "203.0.113.12")),
+                                  "Japan", "JP"),
+            _snapshot_row_country("vpn-c", "203.0.113.13", 1000,
+                                  _b64(TCP_OVPN.replace("203.0.113.1", "203.0.113.13")),
+                                  "Japan", "JP"),
+        ]
+        return "\n".join([CSV_HEADER] + rows) + "\n"
+
+    def test_probe_falls_through_to_next_speed_chunk(self) -> None:
+        latencies = {"203.0.113.11": 0, "203.0.113.12": 0, "203.0.113.13": 50}
+
+        nodes = snapshot_to_nodes(
+            self._csv(), probe_pool=2,
+            probe_fn=lambda host, port: latencies[host])
+
+        self.assertEqual(["203.0.113.13"], [n["server"] for n in nodes])
+        self.assertEqual(50, nodes[0]["latency_ms"])
+
+    def test_probe_all_dead_still_returns_empty(self) -> None:
+        nodes = snapshot_to_nodes(
+            self._csv(), probe_pool=2, probe_fn=lambda host, port: 0)
+
+        self.assertEqual([], nodes)
+
+
+UUID = "a29738e5-bee1-c0fc-b484-ae7c49cbc828"
+
+
+def _vless_cfg(**kwargs):
+    endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+    params = dict(mixed_listen="127.0.0.1", mixed_port=18080,
+                  mixed_users=[("u", "0123456789abcdef")],
+                  vless_uuid=UUID)
+    params.update(kwargs)
+    return build_singbox_config([endpoint], **params)
+
+
+class VlessDualInboundTests(unittest.TestCase):
+    def test_dual_vless_inbounds_present_with_ws_paths(self) -> None:
+        inbounds = {i["tag"]: i for i in _vless_cfg()["inbounds"]}
+        direct = inbounds["vless-direct"]
+        self.assertEqual("vless", direct["type"])
+        self.assertEqual(8080, direct["listen_port"])
+        self.assertEqual(UUID, direct["users"][0]["uuid"])
+        self.assertEqual("ws", direct["transport"]["type"])
+        self.assertEqual("/ws-node", direct["transport"]["path"])
+        chain = inbounds["vless-chain"]
+        self.assertEqual("vless", chain["type"])
+        self.assertEqual(8082, chain["listen_port"])
+        self.assertEqual("/ws-chain", chain["transport"]["path"])
+
+    def test_chain_socks_outbound_targets_mixed(self) -> None:
+        outbounds = {o["tag"]: o for o in _vless_cfg()["outbounds"]}
+        chain = outbounds["chain-socks"]
+        self.assertEqual("socks", chain["type"])
+        self.assertEqual("127.0.0.1", chain["server"])
+        self.assertEqual(18080, chain["server_port"])
+        self.assertEqual("5", str(chain["version"]))
+        self.assertEqual("u", chain["username"])
+
+    def test_route_rules_split_traffic_by_inbound(self) -> None:
+        cfg = _vless_cfg()
+        rules = {(r.get("inbound"), r.get("outbound")) for r in cfg["route"]["rules"]}
+        self.assertIn(("vless-direct", "direct"), rules)
+        self.assertIn(("vless-chain", "chain-socks"), rules)
+        self.assertEqual("auto", cfg["route"]["final"])
+
+    def test_no_vless_by_default(self) -> None:
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+        cfg = build_singbox_config([endpoint], mixed_listen="127.0.0.1",
+                                   mixed_port=18080)
+        tags = [i["tag"] for i in cfg.get("inbounds", [])]
+        self.assertNotIn("vless-direct", tags)
+        self.assertNotIn("chain-socks", [o["tag"] for o in cfg["outbounds"]])
+        self.assertNotIn("rules", cfg["route"])
+
+    def test_vless_without_mixed_raises(self) -> None:
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+        with self.assertRaises(ValueError):
+            build_singbox_config([endpoint], vless_uuid=UUID)
+
+
+if __name__ == "__main__":
+    unittest.main()
