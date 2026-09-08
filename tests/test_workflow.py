@@ -53,6 +53,10 @@ class TrialRunJobTests(unittest.TestCase):
     def test_no_railway_deploy_job(self) -> None:
         self.assertNotIn("deploy-railway:", self.text)
 
+    def test_smoke_asserts_dual_disguise_links(self) -> None:
+        self.assertIn("nodeLinkChain", self.text)
+        self.assertIn("ws-chain", self.text)
+
 
 PUBLISH_WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "publish-image.yml"
 

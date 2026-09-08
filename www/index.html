@@ -411,7 +411,14 @@ footer a:hover{color:var(--text)}
 #realPage .btn-copy { width: 100%; background: #0284c7; font-size: 12px; font-weight: bold; padding: 7px; border: none; border-radius: 4px; color: white; cursor: pointer;}
 #realPage .ip-tag { background: #1e293b; border: 1px solid #475569; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-family: monospace; color: #38bdf8; cursor: pointer; }
 #realPage .ip-tag:hover { background: #38bdf8; color: #0f172a; }
-#realPage .footer { text-align: center; font-size: 11px; color: #64748b; margin-top: 15px; border-top: 1px solid #334155; padding-top: 12px; }
+ #realPage .footer { text-align: center; font-size: 11px; color: #64748b; margin-top: 15px; border-top: 1px solid #334155; padding-top: 12px; }
+ #realPage .path-pill { display: inline-block; font-family: monospace; font-size: 11px; padding: 2px 8px; border-radius: 99px; margin-left: 8px; vertical-align: middle; }
+ #realPage .path-direct { background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.4); }
+ #realPage .path-chain { background: rgba(52,211,153,0.15); color: #34d399; border: 1px solid rgba(52,211,153,0.4); }
+ #realPage .card-direct { border-left: 3px solid #38bdf8; }
+ #realPage .card-chain { border-left: 3px solid #34d399; }
+ #realPage .route-hint { font-size: 11px; color: #64748b; margin-bottom: 8px; }
+ #realPage .btn-copy-chain { width: 100%; background: #059669; font-size: 12px; font-weight: bold; padding: 7px; border: none; border-radius: 4px; color: white; cursor: pointer;}
 </style>
 </head>
 <body>
@@ -1013,14 +1020,22 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
                 </div>
             </div>
 
-            <div class="card">
-                <div class="label" style="color:#38bdf8;">🪐 VLESS 节点通用配置链接</div>
+            <div class="card card-direct">
+                <div class="label" style="color:#38bdf8;">🪐 VLESS 直连节点<span class="path-pill path-direct">/ws-node</span></div>
+                <div class="route-hint">出口 = Railway 本地 IP · 低延迟优先</div>
                 <div class="value" id="nodeLink" style="height:50px;">生成中...</div>
-                <button class="btn-copy" onclick="copyText('nodeLink')">📋 一键复制 VLESS 节点链接</button>
+                <button class="btn-copy" onclick="copyText('nodeLink')">📋 一键复制直连节点链接</button>
+            </div>
+
+            <div class="card card-chain">
+                <div class="label" style="color:#34d399;">🔗 VLESS 链式节点<span class="path-pill path-chain">/ws-chain</span></div>
+                <div class="route-hint">出口 = VPNGate 落地 IP · 换出口优先</div>
+                <div class="value" id="nodeLinkChain" style="height:50px;">生成中...</div>
+                <button class="btn-copy-chain" onclick="copyText('nodeLinkChain')">📋 一键复制链式节点链接</button>
             </div>
 
             <div class="card">
-                <div class="label">📦 Base64 订阅内容</div>
+                <div class="label">📦 Base64 订阅内容（直连 + 链式，共两行）</div>
                 <div class="value" id="subContent" style="height:50px;">生成中...</div>
                 <button class="btn-copy" style="background:#475569;" onclick="copyText('subContent')">📋 一键复制通用订阅内容</button>
             </div>
@@ -1033,7 +1048,9 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
 
         const uuid = "UUID_PLACEHOLDER";
         const wsPath = "/ws-node";
+        const wsChainPath = "/ws-chain";
         const nodeRemark = "NODE_REMARK_PLACEHOLDER";
+        const chainRemark = nodeRemark + "-chain";
         const currentHost = window.location.host;
 
         const urlParams = new URLSearchParams(window.location.search);
@@ -1051,8 +1068,10 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
 
         function generateLinks(connectAddress) {
             const vlessLink = `vless://${uuid}@${connectAddress}:443?encryption=none&security=tls&type=ws&host=${currentHost}&sni=${currentHost}&path=${encodeURIComponent(wsPath)}#${nodeRemark}`;
+            const chainLink = `vless://${uuid}@${connectAddress}:443?encryption=none&security=tls&type=ws&host=${currentHost}&sni=${currentHost}&path=${encodeURIComponent(wsChainPath)}#${chainRemark}`;
             document.getElementById('nodeLink').innerText = vlessLink;
-            document.getElementById('subContent').innerText = btoa(unescape(encodeURIComponent(vlessLink)));
+            document.getElementById('nodeLinkChain').innerText = chainLink;
+            document.getElementById('subContent').innerText = btoa(unescape(encodeURIComponent(vlessLink + "\n" + chainLink)));
         }
 
         function applyCustomIp() {

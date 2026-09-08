@@ -325,6 +325,10 @@ jobs:
                 len(status["countries"]), "countries, tunnel soft-skipped")
           EOF
           curl -m 10 -s http://127.0.0.1:8081/ -o /dev/null -w "disguise page: %{http_code}\n"
+          curl -m 10 -s http://127.0.0.1:8081/ | tee /tmp/disguise.html | grep -q "ws-node"
+          grep -q "ws-chain" /tmp/disguise.html
+          grep -q "nodeLinkChain" /tmp/disguise.html
+          echo "disguise page serves both direct + chain links"
           curl -m 10 -s http://127.0.0.1:4096/health -o /dev/null -w "cc-switch: %{http_code}\n"
           curl -m 10 -s -X POST -H "Authorization: Bearer smoke-admin-token-0123456789" \
             http://127.0.0.1:3000/api/switch -d '{"tag":"auto"}' | grep -q '"ok": true'
