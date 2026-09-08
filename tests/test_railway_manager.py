@@ -3,8 +3,11 @@ import base64
 import contextlib
 import json
 import os
+import re
+import shutil
 import socket
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -1234,6 +1237,179 @@ class TunnelTests(unittest.TestCase):
                 args = popen.call_args[0][0]
                 self.assertIn("t-o-k-e-n", args)
             self.assertEqual("running", manager.status["tunnel"]["state"])
+
+
+class OnclickQuoteTests(unittest.TestCase):
+    """Row actions pass the tag via data attributes + delegation (never
+    inline onclick with Python-eaten backslash quotes)."""
+
+    def test_probe_action_uses_data_attribute(self) -> None:
+        self.assertIn("data-probe='", UI_HTML)
+
+    def test_switch_action_uses_data_attribute(self) -> None:
+        self.assertIn("data-switch='", UI_HTML)
+
+    def test_delegation_handler_reads_data_attributes(self) -> None:
+        self.assertIn('getAttribute("data-probe")', UI_HTML)
+        self.assertIn('getAttribute("data-switch")', UI_HTML)
+
+
+class GlassUiTests(unittest.TestCase):
+    """Glassmorphism console structure + feedback affordances."""
+
+    def test_glass_cards_present(self) -> None:
+        self.assertIn("glass-card", UI_HTML)
+
+    def test_exit_card_present(self) -> None:
+        self.assertIn('id="exit-card"', UI_HTML)
+
+    def test_verify_button_present(self) -> None:
+        self.assertIn('id="btn-verify"', UI_HTML)
+        self.assertIn("verifyExit(", UI_HTML)
+
+    def test_toast_container_present(self) -> None:
+        self.assertIn('id="toast"', UI_HTML)
+
+    def test_history_list_present(self) -> None:
+        self.assertIn('id="history-list"', UI_HTML)
+
+    def test_node_search_present(self) -> None:
+        self.assertIn('id="node-search"', UI_HTML)
+
+    def test_probe_progress_present(self) -> None:
+        self.assertIn('id="probe-progress"', UI_HTML)
+
+    def test_toast_helper_present(self) -> None:
+        self.assertIn("function toast(", UI_HTML)
+
+    def test_busy_helper_present(self) -> None:
+        self.assertIn("function setBusy(", UI_HTML)
+
+    def test_verify_exit_fn_present(self) -> None:
+        self.assertIn("verifyExit(", UI_HTML)
+
+    def test_served_js_parses(self) -> None:
+        """Extract <script> from the RUNTIME UI_HTML (post-Python-unescape)
+        and run node --check: catches backslash-quote breakage that a
+        source-level check would miss."""
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node not installed")
+        match = re.search(r"<script>(.*)</script>", UI_HTML, re.S)
+        self.assertIsNotNone(match)
+        with tempfile.NamedTemporaryFile("w", suffix=".js",
+                                         delete=False,
+                                         encoding="utf-8") as handle:
+            handle.write(match.group(1))
+            path = handle.name
+        try:
+            result = subprocess.run([node, "--check", path],
+                                    capture_output=True, text=True,
+                                    timeout=60)
+        finally:
+            os.unlink(path)
+        self.assertEqual(0, result.returncode, result.stderr)
+
+
+class LoginGateTests(unittest.TestCase):
+    """Token login gate: enter token first, console hidden until verified."""
+
+    def test_login_gate_present(self) -> None:
+        self.assertIn('id="login-gate"', UI_HTML)
+
+    def test_login_input_and_button_present(self) -> None:
+        self.assertIn('id="login-token"', UI_HTML)
+        self.assertIn('id="btn-login"', UI_HTML)
+        self.assertIn("loginEnter(", UI_HTML)
+
+    def test_lock_button_present(self) -> None:
+        self.assertIn('id="btn-lock"', UI_HTML)
+
+    def test_silent_login_present(self) -> None:
+        self.assertIn("silentLogin(", UI_HTML)
+
+    def test_topnav_token_input_removed(self) -> None:
+        self.assertNotIn('id="token"', UI_HTML)
+
+
+class VerifyApiTests(unittest.TestCase):
+    """POST /api/verify measures the real exit IP through the live chain."""
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"/tmp/railway-verify-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-verify-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-verify-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _post(self, manager, path, token=True):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        headers = (f"POST {path} HTTP/1.1\r\nContent-Length: 0\r\n"
+                   + (f"Authorization: Bearer {self.TOKEN}\r\n" if token else ""))
+        client = FakeClient()
+        manager._handle_http(client, (headers + "\r\n").encode("latin-1"))
+        head, _, body = client.sent.partition(b"\r\n\r\n")
+        return head.decode("latin-1").split("\r\n")[0], body
+
+    def _seed_nodes(self, manager, *ips):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": 100, "real_latency_ms": None,
+                           "speed": 1000,
+                           "endpoint": {"tag": f"vpngate-{i}"}}
+                          for i, ip in enumerate(ips)]
+
+    def test_verify_rejects_missing_token(self) -> None:
+        manager = self._manager()
+        try:
+            status_line, _ = self._post(manager, "/api/verify", token=False)
+        finally:
+            manager.stop()
+
+        self.assertIn("401", status_line)
+
+    def test_verify_accepts_and_reports_exit_ip(self) -> None:
+        manager = self._manager(
+            verify_fn=lambda endpoint: ("203.0.113.99", 321))
+        try:
+            self._seed_nodes(manager, "203.0.113.11")
+            status_line, body = self._post(manager, "/api/verify", token=True)
+            accepted_state = manager.status["verify"]["state"]
+            manager._verify_thread.join(timeout=30)
+            final = manager.status["verify"]
+        finally:
+            manager.stop()
+
+        self.assertIn("202", status_line)
+        self.assertTrue(json.loads(body.decode())["accepted"])
+        self.assertEqual("running", accepted_state)
+        self.assertEqual("done", final["state"])
+        self.assertEqual("203.0.113.99", final["exit_ip"])
+        self.assertEqual(321, final["ms"])
+        self.assertEqual("vpngate-0", final["via_tag"])
+
+    def test_verify_without_nodes_returns_503(self) -> None:
+        manager = self._manager(
+            verify_fn=lambda endpoint: ("203.0.113.99", 321))
+        try:
+            status_line, _ = self._post(manager, "/api/verify", token=True)
+        finally:
+            manager.stop()
+
+        self.assertIn("503", status_line)
 
 
 if __name__ == "__main__":

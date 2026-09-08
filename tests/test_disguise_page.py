@@ -37,5 +37,34 @@ class DisguisePageTests(unittest.TestCase):
         self.assertIn(r"\n", self.text)
 
 
+class DisguiseGlassTests(unittest.TestCase):
+    """realPage Glass restyle + copy-both button, fakePage untouched."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = PAGE.read_text(encoding="utf-8")
+
+    def test_realpage_uses_glass_cards(self) -> None:
+        self.assertIn("glass-card", self.text)
+
+    def test_copy_both_button_present(self) -> None:
+        self.assertIn('id="btn-copy-both"', self.text)
+        self.assertIn("copyBoth(", self.text)
+
+    def test_no_alert_calls(self) -> None:
+        self.assertNotIn("alert(", self.text)
+
+    def test_fakepage_untouched(self) -> None:
+        self.assertIn('id="fakePage"', self.text)
+        self.assertIn("三体", self.text)
+
+    def test_preferred_source_bestcfip(self) -> None:
+        self.assertIn("joname1/BestCFip", self.text)
+        self.assertIn("ipv4.txt", self.text)
+
+    def test_pool_parser_handles_ip_port_hash_lines(self) -> None:
+        self.assertIn("parsePoolLine(", self.text)
+
+
 if __name__ == "__main__":
     unittest.main()

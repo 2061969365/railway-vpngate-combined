@@ -398,27 +398,35 @@ footer a:hover{color:var(--text)}
 
 <style>
 .hidden-panel { display: none; }
-#realPage .container { background: #1e293b; padding: 25px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4); max-width: 700px; width: 100%; margin: 0 auto; }
-#realPage .header-area { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #334155; padding-bottom: 15px; margin-bottom: 20px; }
-#realPage .header-area h1 { font-size: 20px; color: #38bdf8; margin: 0; border: none; padding: 0; width: auto; }
-#realPage .badge { background: #059669; color: white; font-size: 11px; padding: 4px 8px; border-radius: 99px; font-weight: bold; }
-#realPage .card { background: #0f172a; border: 1px solid #334155; border-radius: 10px; padding: 15px; margin-bottom: 15px; text-align: left; }
-#realPage .label { font-weight: 600; font-size: 13px; color: #94a3b8; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.05em;}
-#realPage .value { font-family: monospace; font-size: 11px; word-break: break-all; background: #1e293b; padding: 10px; border-radius: 6px; border: 1px solid #475569; color: #cbd5e1; overflow-y: auto; margin-bottom: 10px;}
+#realPage .container { max-width: 760px; width: 100%; margin: 0 auto; }
+#realPage .glass-card { background: rgba(255,255,255,.055); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,.11); border-radius: 22px; padding: 22px 24px; margin-bottom: 18px; box-shadow: 0 18px 50px rgba(0,0,0,.45); text-align: left; }
+#realPage .header-area { display: flex; justify-content: space-between; align-items: center; padding-bottom: 4px; margin-bottom: 18px; }
+#realPage .header-area h1 { font-size: 22px; font-weight: 800; margin: 0; border: none; padding: 0; width: auto; background: linear-gradient(92deg,#fff,#a5b4fc 60%,#67e8f9); -webkit-background-clip: text; background-clip: text; color: transparent; }
+#realPage .badge { background: rgba(52,211,153,.14); color: #6ee7b7; border: 1px solid rgba(52,211,153,.45); font-size: 11px; padding: 5px 12px; border-radius: 99px; font-weight: bold; }
+#realPage .card { background: rgba(255,255,255,.055); backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border: 1px solid rgba(255,255,255,.11); border-radius: 22px; padding: 22px 24px; margin-bottom: 18px; box-shadow: 0 18px 50px rgba(0,0,0,.45); text-align: left; }
+#realPage .label { font-weight: 700; font-size: 14px; color: #e5e7eb; margin-bottom: 8px; letter-spacing: 0.02em;}
+#realPage .value { font-family: monospace; font-size: 11px; word-break: break-all; background: rgba(0,0,0,.32); padding: 12px; border-radius: 12px; border: 1px solid rgba(255,255,255,.1); color: #cbd5e1; overflow-y: auto; margin-bottom: 12px;}
 #realPage .input-group { display: flex; gap: 10px; }
-#realPage input { flex: 1; background: #0f172a; border: 1px solid #475569; border-radius: 6px; padding: 8px; color: white; font-family: monospace; font-size: 13px; }
-#realPage button { background-color: #0284c7; color: white; border: none; padding: 8px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; font-weight: 500; }
-#realPage .btn-copy { width: 100%; background: #0284c7; font-size: 12px; font-weight: bold; padding: 7px; border: none; border-radius: 4px; color: white; cursor: pointer;}
-#realPage .ip-tag { background: #1e293b; border: 1px solid #475569; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-family: monospace; color: #38bdf8; cursor: pointer; }
-#realPage .ip-tag:hover { background: #38bdf8; color: #0f172a; }
- #realPage .footer { text-align: center; font-size: 11px; color: #64748b; margin-top: 15px; border-top: 1px solid #334155; padding-top: 12px; }
- #realPage .path-pill { display: inline-block; font-family: monospace; font-size: 11px; padding: 2px 8px; border-radius: 99px; margin-left: 8px; vertical-align: middle; }
- #realPage .path-direct { background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.4); }
- #realPage .path-chain { background: rgba(52,211,153,0.15); color: #34d399; border: 1px solid rgba(52,211,153,0.4); }
- #realPage .card-direct { border-left: 3px solid #38bdf8; }
- #realPage .card-chain { border-left: 3px solid #34d399; }
- #realPage .route-hint { font-size: 11px; color: #64748b; margin-bottom: 8px; }
- #realPage .btn-copy-chain { width: 100%; background: #059669; font-size: 12px; font-weight: bold; padding: 7px; border: none; border-radius: 4px; color: white; cursor: pointer;}
+#realPage input { flex: 1; background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.14); border-radius: 10px; padding: 10px 12px; color: white; font-family: monospace; font-size: 13px; }
+#realPage button { color: white; border: none; padding: 11px 14px; border-radius: 12px; cursor: pointer; font-size: 13px; font-weight: 600; transition: transform .12s ease, filter .15s ease; }
+#realPage button:hover { filter: brightness(1.12); }
+#realPage button:active { transform: scale(.98); }
+#realPage .btn-copy { width: 100%; background: linear-gradient(92deg,#0284c7,#0ea5e9); font-size: 13px; font-weight: bold; padding: 11px; border: none; border-radius: 12px; color: white; cursor: pointer; box-shadow: 0 6px 22px rgba(2,132,199,.4);}
+#realPage .ip-tag { background: rgba(56,189,248,.1); border: 1px solid rgba(56,189,248,.35); padding: 5px 12px; border-radius: 99px; font-size: 12px; font-family: monospace; color: #38bdf8; cursor: pointer; }
+#realPage .ip-tag:hover { background: #38bdf8; color: #0f172a; box-shadow: 0 0 16px rgba(56,189,248,.5); }
+#realPage .pool-error { font-size: 12px; color: #fca5a5; }
+#realPage .footer { text-align: center; font-size: 11px; color: #69707f; margin-top: 15px; padding-top: 12px; }
+#realPage .path-pill { display: inline-block; font-family: monospace; font-size: 11px; padding: 2px 8px; border-radius: 99px; margin-left: 8px; vertical-align: middle; }
+#realPage .path-direct { background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.4); }
+#realPage .path-chain { background: rgba(52,211,153,0.15); color: #34d399; border: 1px solid rgba(52,211,153,0.4); }
+#realPage .card-direct { border-left: 3px solid #38bdf8; }
+#realPage .card-chain { border-left: 3px solid #34d399; }
+#realPage .route-hint { font-size: 12px; color: #8b91a5; margin-bottom: 10px; }
+#realPage .btn-copy-chain { width: 100%; background: linear-gradient(92deg,#059669,#10b981); font-size: 13px; font-weight: bold; padding: 11px; border: none; border-radius: 12px; color: white; cursor: pointer; box-shadow: 0 6px 22px rgba(5,150,105,.4);}
+#realPage .btn-copy-gray { width: 100%; background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.16); font-size: 13px; font-weight: bold; padding: 11px; border-radius: 12px; color: #e5e7eb; cursor: pointer;}
+#realPage #btn-copy-both { width: 100%; background: linear-gradient(92deg,#6366f1,#0ea5e9); font-size: 14px; font-weight: bold; padding: 13px; border: none; border-radius: 14px; color: white; cursor: pointer; margin-bottom: 18px; box-shadow: 0 8px 26px rgba(99,102,241,.45);}
+#real-toast { position: fixed; right: 22px; bottom: 22px; z-index: 100; display: flex; flex-direction: column; gap: 10px; }
+#real-toast .toast-msg { background: rgba(16,20,36,.94); border: 1px solid rgba(110,231,183,.45); color: #d1fae5; border-radius: 14px; padding: 12px 18px; font-size: 13px; max-width: 360px; box-shadow: 0 10px 30px rgba(0,0,0,.5); }
 </style>
 </head>
 <body>
@@ -1007,9 +1015,9 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
                 <span class="badge">安全防扫描激活</span>
             </div>
 
-            <div class="card">
+            <div class="card glass-card">
                 <div class="label">⚡ 全网最新官方优选 IP 推荐 (全自动动态捞取)</div>
-                <div style="font-size:12px; color:#94a3b8; margin-bottom:10px;">点击下方优质物理加速点，可一键自动重组下方的节点链接：</div>
+                <div style="font-size:12px; color:#8b91a5; margin-bottom:10px;">点击下方优质物理加速点，可一键自动重组下方的节点链接：</div>
                 <div id="ipPool" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:15px;">
                     <span style="font-size:13px; color:#64748b;">正在顺着星际网络打捞新鲜 IP 池...</span>
                 </div>
@@ -1020,27 +1028,30 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
                 </div>
             </div>
 
-            <div class="card card-direct">
+            <div class="card card-direct glass-card">
                 <div class="label" style="color:#38bdf8;">🪐 VLESS 直连节点<span class="path-pill path-direct">/ws-node</span></div>
                 <div class="route-hint">出口 = Railway 本地 IP · 低延迟优先</div>
                 <div class="value" id="nodeLink" style="height:50px;">生成中...</div>
-                <button class="btn-copy" onclick="copyText('nodeLink')">📋 一键复制直连节点链接</button>
+                <button class="btn-copy" onclick="copyText('nodeLink', this)">📋 一键复制直连节点链接</button>
             </div>
 
-            <div class="card card-chain">
+            <div class="card card-chain glass-card">
                 <div class="label" style="color:#34d399;">🔗 VLESS 链式节点<span class="path-pill path-chain">/ws-chain</span></div>
                 <div class="route-hint">出口 = VPNGate 落地 IP · 换出口优先</div>
                 <div class="value" id="nodeLinkChain" style="height:50px;">生成中...</div>
-                <button class="btn-copy-chain" onclick="copyText('nodeLinkChain')">📋 一键复制链式节点链接</button>
+                <button class="btn-copy-chain" onclick="copyText('nodeLinkChain', this)">📋 一键复制链式节点链接</button>
             </div>
 
-            <div class="card">
+            <button id="btn-copy-both" onclick="copyBoth(this)">📋 一键复制两个链接（直连 + 链式）</button>
+
+            <div class="card glass-card">
                 <div class="label">📦 Base64 订阅内容（直连 + 链式，共两行）</div>
                 <div class="value" id="subContent" style="height:50px;">生成中...</div>
-                <button class="btn-copy" style="background:#475569;" onclick="copyText('subContent')">📋 一键复制通用订阅内容</button>
+                <button class="btn-copy-gray" onclick="copyText('subContent', this)">📋 一键复制通用订阅内容</button>
             </div>
 
             <div class="footer">Powered by Xray-core & Cloudflare Tunnel (QUIC Mode)</div>
+            <div id="real-toast"></div>
         </div>
     </div>
 
@@ -1074,39 +1085,78 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
             document.getElementById('subContent').innerText = btoa(unescape(encodeURIComponent(vlessLink + "\n" + chainLink)));
         }
 
+        function realToast(msg) {
+            const box = document.getElementById('real-toast');
+            const el = document.createElement('div');
+            el.className = 'toast-msg';
+            el.innerText = msg;
+            box.appendChild(el);
+            setTimeout(() => el.remove(), 3000);
+        }
+
+        function flashButton(btn, doneText) {
+            if (!btn) return;
+            const orig = btn.innerText;
+            btn.innerText = doneText || '✓ 已复制';
+            setTimeout(() => { btn.innerText = orig; }, 1500);
+        }
+
         function applyCustomIp() {
             const inputVal = document.getElementById('cfIpInput').value.trim();
             generateLinks(inputVal ? inputVal : currentHost);
-            alert(inputVal ? `已成功套用接入点: ${inputVal}` : '已恢复默认隧道域名解析');
+            realToast(inputVal ? `已成功套用接入点: ${inputVal}` : '已恢复默认隧道域名解析');
+        }
+
+        function parsePoolLine(line) {
+            const m = line.trim().match(/^(\d{1,3}(?:\.\d{1,3}){3})/);
+            return m ? m[1] : null;
         }
 
         function fetchOptimizedIPs() {
-            fetch('https://cdn.jsdelivr.net/gh/Alvin9999/new-pac@master/cloudflarespeedtest/cloudflare.txt')
+            fetch('https://raw.githubusercontent.com/joname1/BestCFip/refs/heads/main/ipv4.txt')
                 .then(res => res.text())
                 .then(text => {
-                    const lines = text.split('\n').map(s => s.trim()).filter(s => s.length > 0 && !s.includes(':'));
+                    const ips = [];
+                    for (const line of text.split('\n')) {
+                        const ip = parsePoolLine(line);
+                        if (ip && !ips.includes(ip)) ips.push(ip);
+                        if (ips.length >= 6) break;
+                    }
                     const poolDiv = document.getElementById('ipPool');
                     poolDiv.innerHTML = '';
+                    if (!ips.length) throw new Error('empty pool');
 
-                    lines.slice(0, 6).forEach(ip => {
+                    ips.forEach(ip => {
                         const span = document.createElement('span');
                         span.className = 'ip-tag';
                         span.innerText = ip;
                         span.onclick = () => {
                             document.getElementById('cfIpInput').value = ip;
                             generateLinks(ip);
-                            alert(`✨ 已成功切换到该优选 IP: ${ip}`);
+                            realToast(`✨ 已成功切换到该优选 IP: ${ip}`);
                         };
                         poolDiv.appendChild(span);
                     });
                 }).catch(() => {
-                    document.getElementById('ipPool').innerHTML = '<span style="font-size:12px; color:#ef4444;">公网资源池打捞失败。</span>';
+                    document.getElementById('ipPool').innerHTML = '<span class="pool-error">公网资源池打捞失败。</span>';
                 });
         }
 
-        function copyText(elementId) {
+        function copyText(elementId, btn) {
             const text = document.getElementById(elementId).innerText;
-            navigator.clipboard.writeText(text).then(() => alert('已成功复制到剪贴板！'));
+            navigator.clipboard.writeText(text).then(() => {
+                flashButton(btn);
+                realToast('已成功复制到剪贴板！');
+            });
+        }
+
+        function copyBoth(btn) {
+            const direct = document.getElementById('nodeLink').innerText;
+            const chain = document.getElementById('nodeLinkChain').innerText;
+            navigator.clipboard.writeText(direct + "\n" + chain).then(() => {
+                flashButton(btn, '✓ 两个链接已复制');
+                realToast('直连 + 链式两个链接已复制！');
+            });
         }
     
 </script>
@@ -1120,7 +1170,7 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
     if(real){ real.style.display='block'; real.classList.remove('hidden-panel'); }
     const titleEl=document.getElementById('pageTitle');
     if(titleEl) titleEl.innerText='\uD83D\uDEF8 智能节点订阅管理面板';
-    document.body.style.background='#0f172a';
+    document.body.style.background='radial-gradient(ellipse 55% 40% at 75% 8%,rgba(99,102,241,.20),transparent 70%),radial-gradient(ellipse 45% 35% at 12% 25%,rgba(34,211,238,.12),transparent 70%),#0b1120';
     document.body.style.display='flex';
     document.body.style.justifyContent='center';
     document.body.style.padding='30px 15px';
