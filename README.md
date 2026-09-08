@@ -26,10 +26,15 @@ VPNGate 免费节点（sing-box `openvpn-client`，免 TUN/免特权）+ 双 VLE
     - `ADMIN_TOKEN`（可选；不填则默认为 `vpn`，`/ui` 顶栏输入 `vpn` 点 Save 即可）
    - `TUNNEL_TOKEN`（Cloudflare tunnel token；缺失则 tunnel 软跳过，
      代理本身照常工作，`status["tunnel"] == "no-token"`）
-   - 可选：`VLESS_UUID`（默认与 combined 一致）、`NEZHA_SERVER`/`NEZHA_KEY`、
-     `LIMIT`（默认 0=全量）、`REAL_TOPK`（默认 30）
+    - 可选：`VLESS_UUID`（默认与 combined 一致）、`NEZHA_SERVER`/`NEZHA_KEY`、
+      `LIMIT`（默认 0=全量）、`REAL_TOPK`（默认 30）、`DIAL_WORKERS`（默认 10，
+      真测并发；1GB 内存够用，OOM 就往小调）
 3. 健康检查：`/` 路径填 `/healthz`（部署时需 200，冷启动靠 last-good 秒回）。
 4. 另加一个 TCP Proxy 指向内部 `3000` 端口（可选，给 SOCKS5 用）。
+5. 持久化（强烈建议）：service → Volumes → Add Volume，加完即可，
+   无需配任何变量。代码会自动用 Railway 注入的
+   `RAILWAY_VOLUME_MOUNT_PATH` 存 sing-box 配置/节点存档/last-good
+   （`DATA_DIR` 显式设置会优先）。不挂卷的话每次重部署从 Top30 冷启动。
 
 > 合规警告：Railway AUP 明文禁止 proxy/anonymization 服务，
 > 长期运行有封号风险，仅适合临时演示/调试。
