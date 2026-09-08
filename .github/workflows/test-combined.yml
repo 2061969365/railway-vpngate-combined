@@ -291,7 +291,7 @@ jobs:
         run: |
           # PORT=3000: start.sh always enables VLESS (default UUID), so $PORT
           # must avoid the fixed 8080/8081/8082/4096 ports (same rule as README).
-          docker run -d --name combined-test -p 3000:3000 -p 8080:8080 -p 8082:8082 \
+          docker run -d --name combined-test -p 3000:3000 -p 8080:8080 -p 8081:8081 -p 8082:8082 -p 4096:4096 \
             -e PORT=3000 -e PROXY_USER=u -e PROXY_PASS=0123456789abcdef \
             -e ADMIN_TOKEN=smoke-admin-token-0123456789 \
             -e REAL_TOPK=0 \
