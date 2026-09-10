@@ -415,6 +415,8 @@ footer a:hover{color:var(--text)}
 #realPage .ip-tag { background: rgba(56,189,248,.1); border: 1px solid rgba(56,189,248,.35); padding: 5px 12px; border-radius: 99px; font-size: 12px; font-family: monospace; color: #38bdf8; cursor: pointer; }
 #realPage .ip-tag:hover { background: #38bdf8; color: #0f172a; box-shadow: 0 0 16px rgba(56,189,248,.5); }
 #realPage .pool-error { font-size: 12px; color: #fca5a5; }
+#realPage .btn-retry { width: auto; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.2); padding: 6px 16px; margin-left: 8px; }
+@media(max-width:640px){#realPage .header-area{flex-wrap:wrap;gap:10px}#realPage .header-area h1{font-size:19px}#realPage .input-group{flex-wrap:wrap}#realPage input{flex:1 1 100%;min-width:180px;font-size:16px}#realPage .glass-card{padding:18px 16px;border-radius:18px}#realPage button{min-height:44px}#realPage .ip-tag{padding:8px 14px}#real-toast{right:max(12px,env(safe-area-inset-right));bottom:max(12px,env(safe-area-inset-bottom));left:max(12px,env(safe-area-inset-left))}#real-toast .toast-msg{max-width:none}}
 #realPage .footer { text-align: center; font-size: 11px; color: #69707f; margin-top: 15px; padding-top: 12px; }
 #realPage .path-pill { display: inline-block; font-family: monospace; font-size: 11px; padding: 2px 8px; border-radius: 99px; margin-left: 8px; vertical-align: middle; }
 #realPage .path-direct { background: rgba(56,189,248,0.15); color: #38bdf8; border: 1px solid rgba(56,189,248,0.4); }
@@ -1064,18 +1066,7 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
         const chainRemark = nodeRemark + "-chain";
         const currentHost = window.location.host;
 
-        const urlParams = new URLSearchParams(window.location.search);
-        if (urlParams.has('mirror')) {
-            const fakeEl = document.getElementById('fakePage');
-            if (fakeEl) fakeEl.style.display = 'none';
-            const realEl = document.getElementById('realPage');
-            if (realEl) { realEl.style.display = 'block'; realEl.classList.remove('hidden-panel'); }
-            const titleEl2 = document.getElementById('pageTitle');
-            if (titleEl2) titleEl2.innerText = '🛸 智能节点订阅管理面板';
-            // 样式由第二段脚本统一处理，避免 mainStyle 丢失导致崩溃
-            generateLinks(currentHost);
-            fetchOptimizedIPs();
-        }
+        // mirror handling lives in the single IIFE at the end of body.
 
         function generateLinks(connectAddress) {
             const vlessLink = `vless://${uuid}@${connectAddress}:443?encryption=none&security=tls&type=ws&host=${currentHost}&sni=${currentHost}&path=${encodeURIComponent(wsPath)}#${nodeRemark}`;
@@ -1087,6 +1078,9 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
 
         function realToast(msg) {
             const box = document.getElementById('real-toast');
+            const olds = Array.from(box.children);
+            if (olds.some(c => c.innerText === msg)) return;
+            while (box.children.length >= 3) box.firstChild.remove();
             const el = document.createElement('div');
             el.className = 'toast-msg';
             el.innerText = msg;
@@ -1094,15 +1088,44 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
             setTimeout(() => el.remove(), 3000);
         }
 
+        function fallbackCopy(t) {
+            try {
+                const ta = document.createElement('textarea');
+                ta.value = t;
+                ta.style.position = 'fixed';
+                ta.style.opacity = '0';
+                document.body.appendChild(ta);
+                ta.select();
+                const ok = document.execCommand('copy');
+                ta.remove();
+                return ok;
+            } catch (e) { return false; }
+        }
+
+        function isValidIPv4(ip) {
+            const parts = ip.split('.');
+            if (parts.length !== 4) return false;
+            return parts.every(o => /^\d{1,3}$/.test(o) && +o >= 0 && +o <= 255);
+        }
+
+        function isValidHost(h) {
+            return isValidIPv4(h) || /^([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}$/.test(h);
+        }
+
         function flashButton(btn, doneText) {
             if (!btn) return;
-            const orig = btn.innerText;
+            if (btn._t) clearTimeout(btn._t);
+            if (btn._orig === undefined) btn._orig = btn.innerText;
             btn.innerText = doneText || '✓ 已复制';
-            setTimeout(() => { btn.innerText = orig; }, 1500);
+            btn._t = setTimeout(() => { btn.innerText = btn._orig; btn._orig = undefined; btn._t = null; }, 1500);
         }
 
         function applyCustomIp() {
             const inputVal = document.getElementById('cfIpInput').value.trim();
+            if (inputVal && !isValidHost(inputVal)) {
+                realToast('格式错误：请输入合法 IP 或域名');
+                return;
+            }
             generateLinks(inputVal ? inputVal : currentHost);
             realToast(inputVal ? `已成功套用接入点: ${inputVal}` : '已恢复默认隧道域名解析');
         }
@@ -1112,78 +1135,92 @@ if(simPanel && !window.matchMedia('(prefers-reduced-motion: reduce)').matches &&
             return m ? m[1] : null;
         }
 
+        function renderPool(ips) {
+            const poolDiv = document.getElementById('ipPool');
+            poolDiv.innerHTML = '';
+            ips.forEach(ip => {
+                const span = document.createElement('span');
+                span.className = 'ip-tag';
+                span.innerText = ip;
+                span.onclick = () => {
+                    document.getElementById('cfIpInput').value = ip;
+                    generateLinks(ip);
+                    realToast(`✨ 已成功切换到该优选 IP: ${ip}`);
+                };
+                poolDiv.appendChild(span);
+            });
+        }
+
+        function poolFailed() {
+            document.getElementById('ipPool').innerHTML = '<span class="pool-error">公网资源池打捞失败。</span><button class="btn-retry" onclick="fetchOptimizedIPs()">重试</button>';
+        }
+
         function fetchOptimizedIPs() {
             fetch('https://raw.githubusercontent.com/joname1/BestCFip/refs/heads/main/ipv4.txt')
-                .then(res => res.text())
+                .then(res => { if (!res.ok) throw new Error('primary ' + res.status); return res.text(); })
+                .catch(() => fetch('https://cdn.jsdelivr.net/gh/joname1/BestCFip@main/ipv4.txt').then(res => { if (!res.ok) throw new Error('backup ' + res.status); return res.text(); }))
                 .then(text => {
                     const ips = [];
                     for (const line of text.split('\n')) {
                         const ip = parsePoolLine(line);
-                        if (ip && !ips.includes(ip)) ips.push(ip);
+                        if (ip && isValidIPv4(ip) && !ips.includes(ip)) ips.push(ip);
                         if (ips.length >= 6) break;
                     }
-                    const poolDiv = document.getElementById('ipPool');
-                    poolDiv.innerHTML = '';
                     if (!ips.length) throw new Error('empty pool');
-
-                    ips.forEach(ip => {
-                        const span = document.createElement('span');
-                        span.className = 'ip-tag';
-                        span.innerText = ip;
-                        span.onclick = () => {
-                            document.getElementById('cfIpInput').value = ip;
-                            generateLinks(ip);
-                            realToast(`✨ 已成功切换到该优选 IP: ${ip}`);
-                        };
-                        poolDiv.appendChild(span);
-                    });
-                }).catch(() => {
-                    document.getElementById('ipPool').innerHTML = '<span class="pool-error">公网资源池打捞失败。</span>';
-                });
+                    renderPool(ips);
+                }).catch(poolFailed);
         }
 
         function copyText(elementId, btn) {
             const text = document.getElementById(elementId).innerText.trim();
-            if (!text || text.includes('生成中')) {
+            if (!text || !text.startsWith('vless://')) {
                 realToast('链接还没生成好，请稍后再试');
                 return;
             }
             navigator.clipboard.writeText(text).then(() => {
                 flashButton(btn);
                 realToast('已成功复制到剪贴板！');
-            }).catch(() => realToast('复制失败，请手动选择复制'));
+            }).catch(() => {
+                if (fallbackCopy(text)) { flashButton(btn); realToast('已成功复制到剪贴板！'); }
+                else realToast('复制失败，请手动选择复制');
+            });
         }
 
         function copyBoth(btn) {
             const direct = document.getElementById('nodeLink').innerText.trim();
             const chain = document.getElementById('nodeLinkChain').innerText.trim();
-            if (!direct || !chain || direct.includes('生成中') || chain.includes('生成中')) {
+            if (!direct.startsWith('vless://') || !chain.startsWith('vless://')) {
                 realToast('链接还没生成好，请稍后再试');
                 return;
             }
             navigator.clipboard.writeText(direct + "\n" + chain).then(() => {
                 flashButton(btn, '✓ 两个链接已复制');
                 realToast('直连 + 链式两个链接已复制！');
-            }).catch(() => realToast('复制失败，请手动选择复制'));
+            }).catch(() => {
+                if (fallbackCopy(direct + "\n" + chain)) { flashButton(btn, '✓ 两个链接已复制'); realToast('直连 + 链式两个链接已复制！'); }
+                else realToast('复制失败，请手动选择复制');
+            });
         }
     
 </script>
 <script>
 (function(){
+  // Single mirror entry: page switch + style + first data load.
   const params = new URLSearchParams(window.location.search);
-  if(params.has('mirror')){
-    const fake=document.getElementById('fakePage');
-    if(fake) fake.style.display='none';
-    const real=document.getElementById('realPage');
-    if(real){ real.style.display='block'; real.classList.remove('hidden-panel'); }
-    const titleEl=document.getElementById('pageTitle');
-    if(titleEl) titleEl.innerText='\uD83D\uDEF8 智能节点订阅管理面板';
-    document.body.style.background='radial-gradient(ellipse 55% 40% at 75% 8%,rgba(99,102,241,.20),transparent 70%),radial-gradient(ellipse 45% 35% at 12% 25%,rgba(34,211,238,.12),transparent 70%),#0b1120';
-    document.body.style.display='flex';
-    document.body.style.justifyContent='center';
-    document.body.style.padding='30px 15px';
-    document.body.style.textAlign='left';
-  }
+  if(!params.has('mirror')) return;
+  const fake=document.getElementById('fakePage');
+  if(fake) fake.style.display='none';
+  const real=document.getElementById('realPage');
+  if(real){ real.style.display='block'; real.classList.remove('hidden-panel'); }
+  const titleEl=document.getElementById('pageTitle');
+  if(titleEl) titleEl.innerText='🛸 智能节点订阅管理面板';
+  document.body.style.background='radial-gradient(ellipse 55% 40% at 75% 8%,rgba(99,102,241,.20),transparent 70%),radial-gradient(ellipse 45% 35% at 12% 25%,rgba(34,211,238,.12),transparent 70%),#0b1120';
+  document.body.style.display='flex';
+  document.body.style.justifyContent='center';
+  document.body.style.padding='30px 15px';
+  document.body.style.textAlign='left';
+  try { generateLinks(window.location.host); } catch (e) {}
+  try { fetchOptimizedIPs(); } catch (e) {}
 })();
 </script>
 </body>

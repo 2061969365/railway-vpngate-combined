@@ -72,5 +72,36 @@ class DisguiseGlassTests(unittest.TestCase):
         self.assertIn("parsePoolLine(", self.text)
 
 
+class DisguisePolishTests(unittest.TestCase):
+    """T4-T5: clipboard fallback, input validation, pool retry, single
+    mirror source, realPage mobile."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = PAGE.read_text(encoding="utf-8")
+
+    def test_copy_has_exec_fallback(self) -> None:
+        self.assertIn("execCommand", self.text)
+
+    def test_copy_validates_vless_scheme(self) -> None:
+        self.assertIn("startsWith('vless://')", self.text)
+
+    def test_pool_retry_button(self) -> None:
+        self.assertIn("重试", self.text)
+
+    def test_pool_backup_source(self) -> None:
+        self.assertIn("jsdelivr", self.text.lower())
+
+    def test_ip_octet_validated(self) -> None:
+        self.assertIn("isValidIPv4", self.text)
+
+    def test_mirror_single_source(self) -> None:
+        self.assertEqual(self.text.count("has('mirror')"), 1)
+
+    def test_realpage_mobile_block(self) -> None:
+        compact = self.text.replace(" ", "")
+        self.assertIn("@media(max-width:640px){#realPage", compact)
+
+
 if __name__ == "__main__":
     unittest.main()
