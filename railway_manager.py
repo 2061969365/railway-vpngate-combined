@@ -48,7 +48,8 @@ HTTP_METHODS = (b"GET ", b"POST ", b"HEAD ", b"PUT ", b"DELETE ",
 MIN_PROXY_PASS_LEN = 16
 MIN_ADMIN_TOKEN_LEN = 16
 PIPE_IDLE_TIMEOUT = 300
-HEALTH_CHECK_INTERVAL = 60
+MAX_MUX_CONNECTIONS = 200
+HEALTH_CHECK_INTERVAL = 20
 PINNED_FAIL_THRESHOLD = 3
 SUPERVISE_INTERVAL = 10
 # Cold start uses a bounded Speed-ranked chunk so the first config lands in
@@ -574,8 +575,10 @@ def build_config_from_env(env: dict) -> dict:
         "snapshot_url": snapshot_url,
         "refresh_seconds": int(env.get("REFRESH_SECONDS", "1200")),
         "limit": int(env.get("LIMIT", "0")),
-        "real_topk": int(env.get("REAL_TOPK", "30")),
-        "dial_workers": int(env.get("DIAL_WORKERS", "10")),
+        "real_topk": int(env.get("REAL_TOPK", "10")),
+        "dial_workers": int(env.get("DIAL_WORKERS", "5")),
+        "health_check_interval": int(env.get("HEALTH_CHECK_INTERVAL", "20")),
+        "max_mux_connections": int(env.get("MAX_MUX_CONNECTIONS", "200")),
         "data_dir": env.get("DATA_DIR")
         or env.get("RAILWAY_VOLUME_MOUNT_PATH") or ".",
         "vless_uuid": env.get("VLESS_UUID", ""),
@@ -585,6 +588,46 @@ def build_config_from_env(env: dict) -> dict:
         "cloudflared_bin": env.get("CLOUDFLARED_BIN", "cloudflared"),
         "disguise_path": env.get("DISGUISE_PATH", ""),
     }
+
+
+def assign_stable_tags(nodes: list[dict], old_nodes: list[dict],
+                       tag_prefix: str = "vpngate") -> None:
+    """Reuse tags per ``server:port`` so a refresh that reorders nodes never
+    reshuffles tags (and never drops the pinned preferred tag by accident).
+
+    Nodes already carrying a tag keep it; unseen servers take the next free
+    ``tag_prefix-N`` slot. Operates in place on ``nodes``.
+    """
+    tag_by_key: dict[str, str] = {}
+    for old in old_nodes:
+        old_ep = old.get("endpoint") or {}
+        if old_ep.get("tag"):
+            key = f"{old.get('server')}:{old.get('server_port')}"
+            tag_by_key.setdefault(key, old_ep["tag"])
+    used: set[str] = set()
+    counter = 0
+
+    def _fresh() -> str:
+        nonlocal counter
+        while f"{tag_prefix}-{counter}" in used:
+            counter += 1
+        tag = f"{tag_prefix}-{counter}"
+        counter += 1
+        return tag
+
+    for node in nodes:
+        endpoint = node.get("endpoint") or {}
+        tag = endpoint.get("tag") or ""
+        if tag and tag not in used:
+            used.add(tag)
+            continue
+        key = f"{node.get('server')}:{node.get('server_port')}"
+        reused = tag_by_key.get(key)
+        if not reused or reused in used:
+            reused = _fresh()
+        endpoint["tag"] = reused
+        node["endpoint"] = endpoint
+        used.add(reused)
 
 
 def _now_iso() -> str:
@@ -690,6 +733,8 @@ class RailwayManager:
         auto_refresh: bool = True,
         fetch_on_start: bool = True,
         retry_delays: tuple = (5, 10),
+        max_mux_connections: int = MAX_MUX_CONNECTIONS,
+        health_check_interval: int = HEALTH_CHECK_INTERVAL,
         fetcher=None,
     ) -> None:
         self.port = port
@@ -756,6 +801,8 @@ class RailwayManager:
         self._single_probe_thread: threading.Thread | None = None
         self._verify_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        self._mux_slots = threading.BoundedSemaphore(max_mux_connections)
+        self._health_check_interval = health_check_interval
         self._listener: socket.socket | None = None
         self._singbox_proc: subprocess.Popen | None = None
         self._stderr_handle = None
@@ -838,9 +885,14 @@ class RailwayManager:
                     if kind != "unknown" or not _is_partial_token(peek):
                         break
             if kind in ("socks5", "http-connect"):
-                with self._lock:
-                    self.status["traffic"]["connections"] += 1
-                self._pipe_to_backend(client, peek)
+                if not self._mux_slots.acquire(blocking=False):
+                    return
+                try:
+                    with self._lock:
+                        self.status["traffic"]["connections"] += 1
+                    self._pipe_to_backend(client, peek)
+                finally:
+                    self._mux_slots.release()
             elif kind == "http":
                 self._handle_http(client, peek)
         except OSError:
@@ -1180,18 +1232,18 @@ class RailwayManager:
             if proc is None and not os.path.exists(self.config_path):
                 return
             now = time.monotonic()
-            if self._crash_streak >= MAX_CRASH_STREAK:
-                return  # wait for next successful refresh to reset
             if now < self._retry_after:
                 return
+            # True backoff: the gate above enforces the wait, so reaching
+            # here means a restart is due now. The streak only selects the
+            # *next* delay (clamped, never gives up: a dead tunnel must keep
+            # retrying instead of going dark until the next refresh).
             delay = CRASH_BACKOFFS[min(self._crash_streak, len(CRASH_BACKOFFS) - 1)]
+            self._crash_streak = min(self._crash_streak + 1, len(CRASH_BACKOFFS) - 1)
             self._retry_after = now + delay
-            self._crash_streak += 1
             exit_info = f" (previous exit code {proc.poll()})" if proc else ""
-            self.status["last_error"] = f"sing-box not running{exit_info}, restart in {delay}s"
-            restart_now = now >= self._retry_after - delay
-        if restart_now:
-            self._restart_singbox()
+            self.status["last_error"] = f"sing-box not running{exit_info}, restarting now, next retry in {delay}s"
+        self._restart_singbox()
         # Relaunch the tunnel if it was wanted but died; _start_cloudflared
         # soft-skips again when there is no token/binary.
         with self._lock:
@@ -1202,7 +1254,7 @@ class RailwayManager:
             self._start_cloudflared()
 
     def _health_monitor_loop(self) -> None:
-        while not self._stop_event.wait(HEALTH_CHECK_INTERVAL):
+        while not self._stop_event.wait(self._health_check_interval):
             try:
                 self.check_pinned_health()
             except Exception as exc:  # never kill the monitor thread
@@ -1264,20 +1316,46 @@ class RailwayManager:
                 if node is None:
                     return False, f"unknown tag {tag}"
             target = node["endpoint"]["tag"] if node is not None else None
-            final = target or "auto"
+            effective = "chain" if target else "auto"
         # Apply first; only commit in-memory state after the checked config lands.
-        if not self._apply_config(final=final):
+        # route.final is never a bare endpoint tag: "chain" keeps the pinned
+        # node first with the urltest group as instant hot-standby.
+        if not self._apply_config(final="auto", preferred=target):
             return False, "config check failed, kept previous"
         with self._lock:
             self.preferred_tag = target
             self.status["preferred_tag"] = target
             self._persist_state()
         self._pinned_fail_streak = 0
-        self._record_history("switch", f"final={final}")
-        return True, final
+        self._record_history("switch", f"final={effective}")
+        return True, effective
 
-    def _apply_config(self, final: str) -> bool:
-        """Write checked config atomically and restart sing-box. Returns success."""
+    def _serving_config_unchanged(self, config: dict) -> bool:
+        """True when the on-disk config already serves this exact setup.
+
+        Lets refresh/switch skip the sing-box restart (which drops every live
+        connection) when endpoints, outbounds and routing are identical and
+        the process is still alive.
+        """
+        try:
+            with open(self.config_path, encoding="utf-8") as handle:
+                current = json.load(handle)
+        except (OSError, ValueError):
+            return False
+        for key in ("endpoints", "outbounds", "route", "inbounds"):
+            if current.get(key) != config.get(key):
+                return False
+        return True
+
+    def _apply_config(self, final: str = "auto", preferred: str | None = None) -> bool:
+        """Write checked config atomically and restart sing-box. Returns success.
+
+        preferred names the pinned endpoint tag: it becomes first in the
+        "chain" selector (route.final="chain") with "auto" as hot-standby,
+        never a bare single-endpoint final. When the resulting serving
+        config is identical to the running one, the restart is skipped so
+        live connections survive refreshes and no-op switches.
+        """
         with self._lock:
             endpoints = [n["endpoint"] for n in self._nodes]
             username, password = self.username, self.password
@@ -1291,12 +1369,18 @@ class RailwayManager:
         config = build_singbox_config(
             endpoints, "127.0.0.1", mixed_port,
             mixed_users=[(username, password)], final=final,
+            preferred=preferred,
             vless_uuid=vless_uuid,
             vless_direct_port=direct_port,
             vless_chain_port=chain_port)
         # Everything below runs WITHOUT the lock: `sing-box check` may
         # block ~30s and restart waits on the old process; holding the
         # lock here would stall /healthz and every /api/* handler.
+        if want_singbox and self._serving_config_unchanged(config):
+            with self._lock:
+                proc = self._singbox_proc
+                if proc is not None and proc.poll() is None:
+                    return True
         tmp_path = f"{config_path}.tmp-{os.getpid()}"
         with open(tmp_path, "w", encoding="utf-8") as handle:
             json.dump(config, handle, indent=2)
@@ -1364,6 +1448,7 @@ class RailwayManager:
                 self._first_seen.setdefault(key, old_seen.get(key, now))
             for key in [k for k in self._first_seen if k not in current_keys]:
                 del self._first_seen[key]
+            assign_stable_tags(nodes, self._nodes)
             self._nodes = nodes
             endpoints = nodes_to_endpoints(nodes)
             if self.preferred_tag not in {ep["tag"] for ep in endpoints}:
@@ -1371,8 +1456,10 @@ class RailwayManager:
                     self._record_history("preferred-gone",
                                          f"{self.preferred_tag} vanished, back to auto")
                 self.preferred_tag = None
-            final = self.preferred_tag or "auto"
-        if not self._apply_config(final=final):
+            preferred = self.preferred_tag
+        # route.final stays on the hot-standby path: "chain" (preferred first,
+        # urltest group second) when pinned, plain "auto" otherwise.
+        if not self._apply_config(final="auto", preferred=preferred):
             return self._refresh_failed("config check failed, kept previous")
         with self._lock:
             self.status["endpoints"] = [
@@ -1391,8 +1478,9 @@ class RailwayManager:
             self._crash_streak = 0
         self._persist_nodes()
         self._persist_state()
-        self._record_history("refresh-ok", f"{len(endpoints)} endpoints, final={final}")
-        print(f"refreshed {len(endpoints)} endpoints, final={final}", flush=True)
+        effective = "chain" if preferred else "auto"
+        self._record_history("refresh-ok", f"{len(endpoints)} endpoints, final={effective}")
+        print(f"refreshed {len(endpoints)} endpoints, final={effective}", flush=True)
         return True
 
     def _refresh_failed(self, reason: str) -> bool:
@@ -1615,7 +1703,7 @@ class RailwayManager:
                 return False
             try:
                 new_proc = subprocess.Popen(
-                    [binary, "tunnel", "--protocol", "quic", "--no-autoupdate",
+                    [binary, "tunnel", "--no-autoupdate",
                      "run", "--token", self.tunnel_token],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
@@ -1667,6 +1755,8 @@ def main() -> int:
         limit=cfg["limit"],
         real_topk=cfg["real_topk"],
         dial_workers=cfg["dial_workers"],
+        health_check_interval=cfg["health_check_interval"],
+        max_mux_connections=cfg["max_mux_connections"],
         vless_uuid=cfg["vless_uuid"],
         vless_direct_port=cfg["vless_direct_port"],
         vless_chain_port=cfg["vless_chain_port"],
