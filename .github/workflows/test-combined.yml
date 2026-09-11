@@ -2,12 +2,28 @@ name: Test railway-vpngate-combined
 
 on:
   push:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
   pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
   workflow_dispatch:
+
+# Cancel superseded runs on the same branch: pushes during a long
+# live-dial/stability/trial run no longer stack up runners.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SINGBOX_VERSION: 1.14.0
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -34,27 +50,20 @@ jobs:
           assert "BEGIN CERTIFICATE" in ep["tls"]["certificate"], ep
           print("converter assertions OK:", ep["server"], ep["server_port"])
           EOF
-      - name: Upload generated config
-        uses: actions/upload-artifact@v6
+      - name: Restore sing-box tarball from cache
+        id: cache-singbox
+        uses: actions/cache@v4
         with:
-          name: singbox-sample-config
-          path: /tmp/singbox.json
-
-  singbox-check:
-    needs: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v7
-        with:
-          name: singbox-sample-config
-          path: /tmp
-      - name: Download sing-box v1.14.0
-        run: |
-          curl -Ls https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-amd64.tar.gz | tar xz
-          ./sing-box-*/sing-box version
+          path: /tmp/sing-box-tarball.tgz
+          key: sing-box-tarball-${{ env.SINGBOX_VERSION }}
       - name: Validate config with sing-box check
-        run: ./sing-box-*/sing-box check -c /tmp/singbox.json
+        run: |
+          if [ ! -f /tmp/sing-box-tarball.tgz ]; then
+            curl -Ls "https://github.com/SagerNet/sing-box/releases/download/v${{ env.SINGBOX_VERSION }}/sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64.tar.gz" -o /tmp/sing-box-tarball.tgz
+          fi
+          tar xzf /tmp/sing-box-tarball.tgz
+          ./sing-box-*/sing-box version
+          ./sing-box-*/sing-box check -c /tmp/singbox.json
       - name: Validate dual-VLESS config shape with sing-box check
         run: |
           python - <<'EOF'
@@ -70,6 +79,22 @@ jobs:
           EOF
           ./sing-box-*/sing-box check -c /tmp/singbox-vless.json
           echo "dual-VLESS check OK"
+      - name: Validate pinned chain-fallback shape with sing-box check
+        run: |
+          python - <<'EOF'
+          import json
+          from vpngate_to_singbox import build_singbox_config, ovpn_to_endpoint
+          ep = ovpn_to_endpoint(open("tests/fixtures/vpngate_tcp_sample.ovpn",
+                                     encoding="utf-8").read(), tag="vpngate-0")
+          cfg = build_singbox_config([ep], final="auto", preferred="vpngate-0")
+          assert cfg["route"]["final"] == "chain", cfg["route"]
+          chain = next(o for o in cfg["outbounds"] if o["tag"] == "chain")
+          assert chain["outbounds"] == ["vpngate-0", "auto"], chain
+          json.dump(cfg, open("/tmp/singbox-chain.json", "w"), indent=2)
+          print("chain config written")
+          EOF
+          ./sing-box-*/sing-box check -c /tmp/singbox-chain.json
+          echo "chain-fallback check OK"
 
   live-snapshot:
     needs: test
@@ -101,9 +126,17 @@ jobs:
               assert ep["network"] == "tcp" and ep["system"] is False, ep
           print("live endpoints:", [(e["server"], e["server_port"]) for e in cfg["endpoints"]])
           EOF
+      - name: Restore sing-box tarball from cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sing-box-tarball.tgz
+          key: sing-box-tarball-${{ env.SINGBOX_VERSION }}
       - name: Download sing-box v1.14.0
         run: |
-          curl -Ls https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-amd64.tar.gz | tar xz
+          if [ ! -f /tmp/sing-box-tarball.tgz ]; then
+            curl -Ls "https://github.com/SagerNet/sing-box/releases/download/v${{ env.SINGBOX_VERSION }}/sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64.tar.gz" -o /tmp/sing-box-tarball.tgz
+          fi
+          tar xzf /tmp/sing-box-tarball.tgz
       - name: Validate live config with sing-box check
         run: ./sing-box-*/sing-box check -c /tmp/singbox-live.json
 
@@ -129,13 +162,21 @@ jobs:
           python vpngate_to_singbox.py --csv /tmp/vpngate.csv \
             --limit 3 --output /tmp/singbox-dial.json --tag vpngate \
             --mixed 127.0.0.1:18080
+      - name: Restore sing-box tarball from cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sing-box-tarball.tgz
+          key: sing-box-tarball-${{ env.SINGBOX_VERSION }}
       - name: Download sing-box v1.14.0
         run: |
-          curl -Ls https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-amd64.tar.gz | tar xz
+          if [ ! -f /tmp/sing-box-tarball.tgz ]; then
+            curl -Ls "https://github.com/SagerNet/sing-box/releases/download/v${{ env.SINGBOX_VERSION }}/sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64.tar.gz" -o /tmp/sing-box-tarball.tgz
+          fi
+          tar xzf /tmp/sing-box-tarball.tgz
           ./sing-box-*/sing-box check -c /tmp/singbox-dial.json
       - name: Real tunnel latency ranking (fresh nodes, gated)
         run: |
-          export PATH="$PWD/sing-box-1.14.0-linux-amd64:$PATH"
+          export PATH="$PWD/sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64:$PATH"
           sing-box version
           python - <<'EOF'
           import json
@@ -199,7 +240,7 @@ jobs:
   live-stability:
     needs: test
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -216,11 +257,19 @@ jobs:
           python vpngate_to_singbox.py --csv /tmp/vpngate.csv \
             --limit 3 --output /tmp/singbox-stab.json --tag vpngate \
             --mixed 127.0.0.1:18080
+      - name: Restore sing-box tarball from cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sing-box-tarball.tgz
+          key: sing-box-tarball-${{ env.SINGBOX_VERSION }}
       - name: Download sing-box v1.14.0
         run: |
-          curl -Ls https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-amd64.tar.gz | tar xz
+          if [ ! -f /tmp/sing-box-tarball.tgz ]; then
+            curl -Ls "https://github.com/SagerNet/sing-box/releases/download/v${{ env.SINGBOX_VERSION }}/sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64.tar.gz" -o /tmp/sing-box-tarball.tgz
+          fi
+          tar xzf /tmp/sing-box-tarball.tgz
           ./sing-box-*/sing-box check -c /tmp/singbox-stab.json
-      - name: Probe stability (6x latency + 10MB download per endpoint)
+      - name: Probe stability (5x latency + 10MB download per endpoint)
         run: |
           : > /tmp/probe.jsonl
           record() { python3 - "$@" <<'EOF'
@@ -244,7 +293,7 @@ jobs:
           EOF
             ./sing-box-*/sing-box run -c /tmp/singbox-stab-try.json > /tmp/singbox-stab.log 2>&1 &
             sleep 25
-            for r in 1 2 3 4 5 6; do
+            for r in 1 2 3 4 5; do
               if out=$(curl -m 20 -s -o /dev/null -x socks5h://127.0.0.1:18080 \
                   -w "%{http_code} %{time_total}" https://www.gstatic.com/generate_204); then
                 set -- $out
@@ -252,7 +301,7 @@ jobs:
               else
                 record "vpngate-$i" latency 0 0 0 "dial"
               fi
-              sleep 8
+              sleep 5
             done
             if out=$(curl -m 90 -s -o /dev/null -x socks5h://127.0.0.1:18080 \
                 -w "%{http_code} %{time_total} %{size_download}" "https://speed.cloudflare.com/__down?bytes=10000000"); then
@@ -283,8 +332,16 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
       - name: Build combined image
-        run: docker build -f Dockerfile -t combined-railway:test .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: combined-railway:test
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       - name: Smoke test (boot + routes, no TUN)
         run: |
           # PORT=3000: start.sh always enables VLESS (default UUID), so $PORT
@@ -344,11 +401,27 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
       - name: Build combined image
-        run: docker build -f Dockerfile -t combined-railway:trial .
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: combined-railway:trial
+          load: true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Restore sing-box tarball from cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/sing-box-tarball.tgz
+          key: sing-box-tarball-${{ env.SINGBOX_VERSION }}
       - name: Download sing-box v1.14.0 (VLESS client for path checks)
         run: |
-          curl -Ls https://github.com/SagerNet/sing-box/releases/download/v1.14.0/sing-box-1.14.0-linux-amd64.tar.gz | tar xz
+          if [ ! -f /tmp/sing-box-tarball.tgz ]; then
+            curl -Ls "https://github.com/SagerNet/sing-box/releases/download/v${{ env.SINGBOX_VERSION }}/sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64.tar.gz" -o /tmp/sing-box-tarball.tgz
+          fi
+          tar xzf /tmp/sing-box-tarball.tgz
       - name: Run container with real dial + VLESS enabled
         run: |
           docker run -d --name combined-trial -p 3000:3000 -p 8080:8080 -p 8082:8082 \
@@ -526,3 +599,34 @@ jobs:
           docker rm -f combined-trial || true
           pkill -f vless-chain || true
           pkill -f vless-node || true
+
+  publish-image:
+    name: Publish verified image to GHCR
+    # Only the trial-run-gated image gets published: unit tests, sing-box
+    # check, live dial, stability probe and the dual-VLESS trial all passed.
+    needs: trial-run
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push verified image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
