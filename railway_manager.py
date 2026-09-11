@@ -47,8 +47,10 @@ HTTP_METHODS = (b"GET ", b"POST ", b"HEAD ", b"PUT ", b"DELETE ",
                 b"OPTIONS ", b"PATCH ")
 MIN_PROXY_PASS_LEN = 16
 MIN_ADMIN_TOKEN_LEN = 16
-PIPE_IDLE_TIMEOUT = 300
-MAX_MUX_CONNECTIONS = 200
+PIPE_IDLE_TIMEOUT = 120
+MAX_MUX_CONNECTIONS = 100
+MAX_POST_CONNECTIONS = 16
+STALE_RUNNING_AFTER = 180.0
 HEALTH_CHECK_INTERVAL = 20
 PINNED_FAIL_THRESHOLD = 3
 SUPERVISE_INTERVAL = 10
@@ -676,7 +678,11 @@ async function probeOne(tag) {
       }
       if (i === 39) toast("单测超时，请重试", true);
     }
-  } catch (e) { if (isAbort(e)) return; toast("单测失败: " + e.message, true); }
+  } catch (e) {
+    if (isAbort(e)) return;
+    if (/409/.test(e.message || "")) { toast("已有单测进行中，稍后再试", true); refresh(); return; }
+    toast("单测失败: " + e.message, true);
+  }
   refresh();
 }
 async function refreshNow() {
@@ -749,6 +755,12 @@ async function verifyExit() {
     }
   } catch (e) {
     if (isAbort(e)) return;
+    if (/409/.test(e.message || "")) {
+      toast("已有验证进行中，稍后再试", true);
+      setBusy("btn-verify", false);
+      refresh();
+      return;
+    }
     const el = document.getElementById("verify-result");
     el.textContent = "验证失败：" + e.message;
     el.style.color = "#fca5a5";
@@ -924,10 +936,14 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _http_response(status: str, content_type: str, body: bytes) -> bytes:
-    header = (f"HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\n"
-              f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n")
-    return header.encode() + body
+def _http_response(status: str, content_type: str, body: bytes,
+                   extra_headers: dict | None = None) -> bytes:
+    lines = [f"HTTP/1.1 {status}", f"Content-Type: {content_type}",
+             f"Content-Length: {len(body)}"]
+    if extra_headers:
+        lines.extend(f"{name}: {value}" for name, value in extra_headers.items())
+    lines.append("Connection: close")
+    return ("\r\n".join(lines) + "\r\n\r\n").encode() + body
 
 
 def _forward(source: socket.socket, dest: socket.socket) -> int:
@@ -1098,6 +1114,7 @@ class RailwayManager:
         self._verify_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._mux_slots = threading.BoundedSemaphore(max_mux_connections)
+        self._post_slots = threading.BoundedSemaphore(MAX_POST_CONNECTIONS)
         self._health_check_interval = health_check_interval
         self._listener: socket.socket | None = None
         self._singbox_proc: subprocess.Popen | None = None
@@ -1115,13 +1132,18 @@ class RailwayManager:
         self._listener.settimeout(1.0)
         self.bound_port = self._listener.getsockname()[1]
         self.status["started_at"] = _now_iso()
-        threading.Thread(target=self._accept_loop, daemon=True).start()
+        threading.Thread(target=self._accept_loop, daemon=True,
+                         name="accept-loop").start()
         if self.auto_refresh:
-            threading.Thread(target=self._refresh_loop, daemon=True).start()
-        threading.Thread(target=self._supervise_loop, daemon=True).start()
-        threading.Thread(target=self._health_monitor_loop, daemon=True).start()
+            threading.Thread(target=self._refresh_loop, daemon=True,
+                             name="refresh-loop").start()
+        threading.Thread(target=self._supervise_loop, daemon=True,
+                         name="supervise-loop").start()
+        threading.Thread(target=self._health_monitor_loop, daemon=True,
+                         name="health-monitor").start()
         if self.fetch_on_start:
-            threading.Thread(target=self._initial_refresh, daemon=True).start()
+            threading.Thread(target=self._initial_refresh, daemon=True,
+                             name="initial-refresh").start()
         self._start_cloudflared()
         print(f"listening on 0.0.0.0:{self.bound_port}, backend 127.0.0.1:{self.mixed_port}",
               flush=True)
@@ -1276,11 +1298,34 @@ class RailwayManager:
                 "200 OK", "application/json",
                 json.dumps({"limit": limit,
                             "lines": tail.splitlines() if tail else []}).encode()))
-        elif path == "/api/refresh" and method == "POST":
+        elif method == "POST":
+            # Expensive endpoints share a small slot pool so a burst of
+            # refresh/probe/verify POSTs can't exhaust the box. Cheap GETs
+            # (healthz/status/ui/logs) never take a slot and can't starve.
+            if not self._post_slots.acquire(blocking=False):
+                client.sendall(_http_response(
+                    "503 Service Unavailable", "text/plain",
+                    b"busy, retry later", {"Retry-After": "5"}))
+                return
+            try:
+                self._route_post(client, path, headers, body)
+            finally:
+                self._post_slots.release()
+            return
+        elif path.startswith("/api/"):
+            client.sendall(_http_response("405 Method Not Allowed", "text/plain",
+                                          b"method not allowed"))
+        else:
+            client.sendall(_http_response("404 Not Found", "text/plain", b"not found"))
+
+    def _route_post(self, client: socket.socket, path: str,
+                    headers: dict, body: bytes) -> None:
+        """Dispatch an authorized POST (caller holds a _post_slots slot)."""
+        if path == "/api/refresh":
             ok = self.refresh_once()
             client.sendall(_http_response(
                 "200 OK", "application/json", json.dumps({"ok": ok}).encode()))
-        elif path == "/api/full_probe" and method == "POST":
+        elif path == "/api/full_probe":
             if not self._start_full_probe():
                 client.sendall(_http_response(
                     "409 Conflict", "application/json",
@@ -1290,7 +1335,7 @@ class RailwayManager:
             client.sendall(_http_response(
                 "202 Accepted", "application/json",
                 json.dumps({"accepted": True}).encode()))
-        elif path == "/api/probe" and method == "POST":
+        elif path == "/api/probe":
             try:
                 payload = json.loads((body or b"{}").decode("utf-8") or "{}")
             except (ValueError, UnicodeDecodeError):
@@ -1307,12 +1352,19 @@ class RailwayManager:
                     "404 Not Found", "application/json",
                     json.dumps({"ok": False, "error": "unknown tag"}).encode()))
                 return
-            self._start_single_probe(node)
+            accepted, running_tag = self._start_single_probe(node)
+            if not accepted:
+                client.sendall(_http_response(
+                    "409 Conflict", "application/json",
+                    json.dumps({"accepted": False,
+                                "error": "already running",
+                                "tag": running_tag}).encode()))
+                return
             client.sendall(_http_response(
                 "202 Accepted", "application/json",
                 json.dumps({"accepted": True,
                             "tag": node["endpoint"]["tag"]}).encode()))
-        elif path == "/api/verify" and method == "POST":
+        elif path == "/api/verify":
             node = self._verify_target_node()
             if node is None:
                 client.sendall(_http_response(
@@ -1320,12 +1372,19 @@ class RailwayManager:
                     json.dumps({"ok": False,
                                 "error": "no nodes"}).encode()))
                 return
-            self._start_verify(node)
+            accepted, via_tag = self._start_verify(node)
+            if not accepted:
+                client.sendall(_http_response(
+                    "409 Conflict", "application/json",
+                    json.dumps({"accepted": False,
+                                "error": "already running",
+                                "tag": via_tag}).encode()))
+                return
             client.sendall(_http_response(
                 "202 Accepted", "application/json",
                 json.dumps({"accepted": True,
                             "via_tag": node.get("endpoint", {}).get("tag")}).encode()))
-        elif path == "/api/switch" and method == "POST":
+        elif path == "/api/switch":
             try:
                 payload = json.loads((body or b"{}").decode("utf-8") or "{}")
             except (ValueError, UnicodeDecodeError):
@@ -1411,6 +1470,7 @@ class RailwayManager:
     def status_snapshot(self) -> dict:
         with self._lock:
             snapshot = json.loads(json.dumps(self.status))
+        snapshot["threads"] = threading.active_count()
         now = datetime.now(timezone.utc)
         try:
             started = datetime.strptime(self.status["started_at"] or "", "%Y-%m-%dT%H:%M:%SZ")
@@ -1810,7 +1870,8 @@ class RailwayManager:
                 return False
             self.status["full_probe"] = {"state": "running", "done": 0,
                                          "total": len(self._nodes)}
-        thread = threading.Thread(target=self._run_full_probe, daemon=True)
+        thread = threading.Thread(target=self._run_full_probe, daemon=True,
+                                      name="full-probe")
         self._full_probe_thread = thread
         thread.start()
         return True
@@ -1854,20 +1915,46 @@ class RailwayManager:
                 self.status["endpoints"].append(entry)
                 by_key[key] = entry
 
-    def _start_single_probe(self, node: dict) -> None:
+    @staticmethod
+    def _running_fresh(state: dict, thread) -> bool:
+        """True when a running worker is alive and not stale.
+
+        A hung dial_fn (or a thread parked on the dial gate) must never wedge
+        the guard forever: runs older than STALE_RUNNING_AFTER may be
+        superseded by a fresh request.
+        """
+        if state.get("state") != "running":
+            return False
+        if thread is not None and thread.is_alive():
+            age = time.monotonic() - state.get("started_at", 0.0)
+            return age < STALE_RUNNING_AFTER
+        return False
+
+    def _start_single_probe(self, node: dict) -> tuple[bool, str | None]:
+        """Start a single-node probe unless one is already running.
+
+        Returns (accepted, running_tag): global per-slot single-flight, so a
+        second click while any probe runs gets a 409 naming the running tag
+        instead of stacking another dial thread + sing-box process.
+        """
         with self._lock:
+            cur = self.status["probe"]
+            if self._running_fresh(cur, self._single_probe_thread):
+                return False, cur.get("tag")
             tag = node.get("endpoint", {}).get("tag")
             self.status["probe"] = {"state": "running", "tag": tag,
-                                    "ms": None, "error": None}
+                                    "ms": None, "error": None,
+                                    "started_at": time.monotonic()}
         thread = threading.Thread(target=self._run_single_probe, args=(node,),
-                                  daemon=True)
+                                  daemon=True, name=f"single-probe-{tag}")
         self._single_probe_thread = thread
         thread.start()
+        return True, tag
 
     def _run_single_probe(self, node: dict) -> None:
-        # No startup gate here (unlike the full probe): the caller polls
-        # /api/status for state==done, and an instant dial_fn in tests still
-        # lands "done" only after the thread actually ran.
+        # Startup gate so /api/status readers can observe the "running"
+        # state even when dial_fn returns instantly (e.g. in tests).
+        time.sleep(0.2)
         tag = node.get("endpoint", {}).get("tag")
         try:
             ms = self.dial_fn(node)
@@ -1897,16 +1984,27 @@ class RailwayManager:
                     return node
         return self._nodes[0] if self._nodes else None
 
-    def _start_verify(self, node: dict) -> None:
+    def _start_verify(self, node: dict) -> tuple[bool, str | None]:
+        """Start an exit-IP verify unless one is already running.
+
+        Same single-flight contract as _start_single_probe: returns
+        (accepted, running_tag); the verify target is singular by design
+        (pinned preferred, else first node), so one slot suffices.
+        """
         with self._lock:
+            cur = self.status["verify"]
+            if self._running_fresh(cur, self._verify_thread):
+                return False, cur.get("via_tag")
             tag = node.get("endpoint", {}).get("tag")
             self.status["verify"] = {"state": "running", "exit_ip": None,
                                      "ms": None, "via_tag": tag,
-                                     "error": None}
+                                     "error": None,
+                                     "started_at": time.monotonic()}
         thread = threading.Thread(target=self._run_verify, args=(node,),
-                                  daemon=True)
+                                  daemon=True, name=f"verify-{tag}")
         self._verify_thread = thread
         thread.start()
+        return True, tag
 
     def _run_verify(self, node: dict) -> None:
         # Startup gate so /api/status readers can observe the "running"
