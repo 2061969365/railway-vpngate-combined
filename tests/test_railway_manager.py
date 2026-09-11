@@ -876,7 +876,9 @@ class SwitchTests(unittest.TestCase):
                 self.assertIn(b"200 OK", response)
                 self.assertEqual("vpngate-0", manager.preferred_tag)
                 written = _read_json(f"{tmpdir}/singbox.json")
-                self.assertEqual("vpngate-0", written["route"]["final"])
+                self.assertEqual("chain", written["route"]["final"])
+                chain = next(o for o in written["outbounds"] if o["tag"] == "chain")
+                self.assertEqual(["vpngate-0", "auto"], chain["outbounds"])
             finally:
                 manager.stop()
 
@@ -908,9 +910,12 @@ class SwitchTests(unittest.TestCase):
 
                     ok, tag = manager.switch(tag="vpngate-0")
                     self.assertTrue(ok)
-                    self.assertEqual("vpngate-0", tag)
+                    self.assertEqual("chain", tag)
                     written = _read_json(f"{tmpdir}/singbox.json")
-                    self.assertEqual("vpngate-0", written["route"]["final"])
+                    self.assertEqual("chain", written["route"]["final"])
+                    chain = next(o for o in written["outbounds"]
+                                 if o["tag"] == "chain")
+                    self.assertEqual(["vpngate-0", "auto"], chain["outbounds"])
 
                     ok, tag = manager.switch(tag="auto")
                     self.assertTrue(ok)
@@ -1853,6 +1858,160 @@ class LoopSurvivalTests(unittest.TestCase):
             manager.stop()
 
         self.assertEqual(["restart", "restart"], calls)
+
+
+class StableTagTests(unittest.TestCase):
+    """A refresh that reorders nodes must not reshuffle tags or drop pin."""
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _csv(self, speeds: dict) -> str:
+        header = "#HostName,IP,Score,Ping,Speed,CountryLong,CountryShort,NumVpnSessions,OpenVPN_ConfigData_Base64"
+        rows = []
+        for ip, speed in speeds.items():
+            config = base64.b64encode(
+                TCP_OVPN.replace("203.0.113.1", ip).encode()).decode()
+            rows.append(f"vpn-{ip},{ip},100,20,{speed},Japan,JP,1,{config}")
+        return header + "\n" + "\n".join(rows) + "\n"
+
+    def _manager(self, tmpdir: str, csv_text: str, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), admin_token=self.TOKEN,
+                        start_singbox=True, auto_refresh=False, fetch_on_start=False,
+                        config_path=f"{tmpdir}/singbox.json",
+                        nodes_path=f"{tmpdir}/nodes.json",
+                        state_path=f"{tmpdir}/state.json",
+                        fetcher=lambda url, timeout: csv_text)
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def test_assign_stable_tags_reuses_tag_per_server(self) -> None:
+        from railway_manager import assign_stable_tags
+
+        def node(server, tag=""):
+            return {"server": server, "server_port": 443,
+                    "endpoint": {"tag": tag, "server": server,
+                                 "server_port": 443}}
+
+        old = [node("203.0.113.11", "vpngate-0"),
+               node("203.0.113.12", "vpngate-1")]
+        new = [node("203.0.113.12"), node("203.0.113.11"),
+               node("203.0.113.13")]
+        assign_stable_tags(new, old)
+        by_server = {n["server"]: n["endpoint"]["tag"] for n in new}
+        self.assertEqual("vpngate-0", by_server["203.0.113.11"])
+        self.assertEqual("vpngate-1", by_server["203.0.113.12"])
+        self.assertTrue(by_server["203.0.113.13"].startswith("vpngate-"))
+        self.assertEqual(3, len(set(by_server.values())))
+
+    def test_same_server_keeps_tag_across_reordered_refresh(self) -> None:
+        first = self._csv({"203.0.113.11": 5000, "203.0.113.12": 1000})
+        second = self._csv({"203.0.113.12": 5000, "203.0.113.11": 1000})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir, first)
+            try:
+                with _fake_singbox(), \
+                     mock.patch("railway_manager.probe_tcp_latency",
+                                return_value=100):
+                    self.assertTrue(manager.refresh_once())
+                tags_first = {n["server"]: n["endpoint"]["tag"]
+                              for n in manager._nodes}
+                pinned = tags_first["203.0.113.11"]
+                manager.switch(tag=pinned)
+
+                manager.fetcher = lambda url, timeout: second
+                with _fake_singbox(), \
+                     mock.patch("railway_manager.probe_tcp_latency",
+                                return_value=100):
+                    self.assertTrue(manager.refresh_once())
+                tags_second = {n["server"]: n["endpoint"]["tag"]
+                               for n in manager._nodes}
+                self.assertEqual(tags_first, tags_second)
+                self.assertEqual(pinned, manager.preferred_tag)
+                written = _read_json(f"{tmpdir}/singbox.json")
+                self.assertEqual("chain", written["route"]["final"])
+            finally:
+                manager.stop()
+
+
+class SuperviseBackoffTests(unittest.TestCase):
+    def _manager(self, **kwargs):
+        # No tempfile here: DeadProc skips every filesystem branch, so these
+        # tests also run inside a file sandbox. Dummy paths are never touched.
+        defaults = dict(port=0, mixed_port=get_free_port(),
+                        start_singbox=True, auto_refresh=False, fetch_on_start=False,
+                        config_path="noop-supervise-singbox.json",
+                        nodes_path="noop-supervise-nodes.json",
+                        state_path="noop-supervise-state.json",
+                        fetcher=lambda url, timeout: "")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _dead_proc(self):
+        class DeadProc:
+            def poll(self):
+                return 1
+
+            def terminate(self):
+                pass
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        return DeadProc()
+
+    def test_supervise_retries_beyond_max_streak(self) -> None:
+        import railway_manager as manager_mod
+        manager = self._manager()
+        # DeadProc (poll()=exited) skips the config-file branch without
+        # touching the filesystem, so this also runs in a file sandbox.
+        manager._singbox_proc = self._dead_proc()
+        manager._crash_streak = manager_mod.MAX_CRASH_STREAK
+        manager._retry_after = 0.0
+        try:
+            with mock.patch.object(manager, "_restart_singbox") as restart:
+                manager._supervise_once()
+        finally:
+            manager.stop()
+        restart.assert_called_once()
+
+    def test_supervise_skips_restart_inside_backoff_window(self) -> None:
+        manager = self._manager()
+        manager._singbox_proc = self._dead_proc()
+        manager._retry_after = time.monotonic() + 1000.0
+        try:
+            with mock.patch.object(manager, "_restart_singbox") as restart:
+                manager._supervise_once()
+        finally:
+            manager.stop()
+        restart.assert_not_called()
+
+
+class MuxLimitTests(unittest.TestCase):
+    def test_excess_mux_connections_are_dropped(self) -> None:
+        # No tempfile: the constructor and the dropped path never touch
+        # the filesystem, so this runs inside a file sandbox too.
+        manager = RailwayManager(
+            port=0, mixed_port=get_free_port(),
+            start_singbox=False, auto_refresh=False, fetch_on_start=False,
+            max_mux_connections=1,
+            config_path="noop-mux-singbox.json",
+            nodes_path="noop-mux-nodes.json",
+            state_path="noop-mux-state.json")
+        try:
+            self.assertTrue(manager._mux_slots.acquire(blocking=False))
+            client, peer = socket.socketpair()
+            try:
+                client.sendall(b"\x05\x01\x00")
+                before = manager.status["traffic"]["connections"]
+                manager._handle_client(peer)
+                self.assertEqual(before,
+                                 manager.status["traffic"]["connections"])
+            finally:
+                client.close()
+        finally:
+            manager.stop()
 
 
 if __name__ == "__main__":
