@@ -2133,8 +2133,252 @@ class ConsoleV2Tests(unittest.TestCase):
         self.assertIn("function skeletonRows(", UI_HTML)
         self.assertIn("正在验证新出口", UI_HTML)
 
+    def test_probe_verify_409_branches_present(self) -> None:
+        self.assertIn("已有单测进行中，稍后再试", UI_HTML)
+        self.assertIn("已有验证进行中，稍后再试", UI_HTML)
+
     def test_reduced_motion_respected(self) -> None:
         self.assertIn("prefers-reduced-motion", UI_HTML)
+
+
+class ProbeGuardTests(unittest.TestCase):
+    """Single-flight single-probe: second POST gets 409, never a phantom poll."""
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path="noop-guard-singbox.json",
+                        nodes_path="noop-guard-nodes.json",
+                        state_path="noop-guard-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _post_json(self, manager, path, payload):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        raw = json.dumps(payload).encode()
+        headers = (f"POST {path} HTTP/1.1\r\nContent-Length: {len(raw)}\r\n"
+                   f"Authorization: Bearer {self.TOKEN}\r\n")
+        client = FakeClient()
+        manager._handle_http(client, (headers + "\r\n").encode("latin-1") + raw)
+        head, _, body = client.sent.partition(b"\r\n\r\n")
+        return head.decode("latin-1").split("\r\n")[0], json.loads(body.decode())
+
+    def _seed_nodes(self, manager, *ips):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": 100, "real_latency_ms": None,
+                           "speed": 1000,
+                           "endpoint": {"tag": f"vpngate-{i}"}}
+                          for i, ip in enumerate(ips)]
+
+    def test_same_tag_double_post_gets_409_then_202_after_done(self) -> None:
+        gate = threading.Event()
+        manager = self._manager(dial_fn=lambda node: gate.wait(timeout=30) or 77)
+        try:
+            self._seed_nodes(manager, "203.0.113.11")
+            line1, body1 = self._post_json(manager, "/api/probe", {"tag": "vpngate-0"})
+            line2, body2 = self._post_json(manager, "/api/probe", {"tag": "vpngate-0"})
+            gate.set()
+            manager._single_probe_thread.join(timeout=30)
+            line3, body3 = self._post_json(manager, "/api/probe", {"tag": "vpngate-0"})
+            manager._single_probe_thread.join(timeout=30)
+        finally:
+            gate.set()
+            manager.stop()
+
+        self.assertIn("202", line1)
+        self.assertTrue(body1["accepted"])
+        self.assertIn("409", line2)
+        self.assertFalse(body2["accepted"])
+        self.assertIn("vpngate-0", body2.get("tag", ""))
+        self.assertIn("202", line3)
+        self.assertTrue(body3["accepted"])
+
+    def test_cross_tag_post_while_running_gets_409(self) -> None:
+        gate = threading.Event()
+        manager = self._manager(dial_fn=lambda node: gate.wait(timeout=30) or 77)
+        try:
+            self._seed_nodes(manager, "203.0.113.11", "203.0.113.12")
+            line1, _ = self._post_json(manager, "/api/probe", {"tag": "vpngate-0"})
+            line2, body2 = self._post_json(manager, "/api/probe", {"tag": "vpngate-1"})
+        finally:
+            gate.set()
+            manager.stop()
+
+        self.assertIn("202", line1)
+        self.assertIn("409", line2)
+        self.assertIn("vpngate-0", body2.get("tag", ""))
+
+    def test_stale_running_guard_allows_supersede(self) -> None:
+        manager = self._manager(dial_fn=lambda node: 5)
+        try:
+            self._seed_nodes(manager, "203.0.113.11")
+            with manager._lock:
+                manager.status["probe"] = {"state": "running", "tag": "vpngate-0",
+                                           "ms": None, "error": None,
+                                           "started_at": time.monotonic() - 200.0}
+                manager._single_probe_thread = None
+            line, body = self._post_json(manager, "/api/probe", {"tag": "vpngate-0"})
+            manager._single_probe_thread.join(timeout=30)
+        finally:
+            manager.stop()
+
+        self.assertIn("202", line)
+        self.assertTrue(body["accepted"])
+
+    def test_probe_exception_releases_guard(self) -> None:
+        def _boom(node):
+            raise RuntimeError("tunnel down")
+
+        manager = self._manager(dial_fn=_boom)
+        try:
+            self._seed_nodes(manager, "203.0.113.11")
+            self._post_json(manager, "/api/probe", {"tag": "vpngate-0"})
+            manager._single_probe_thread.join(timeout=30)
+            line, body = self._post_json(manager, "/api/probe", {"tag": "vpngate-0"})
+            manager._single_probe_thread.join(timeout=30)
+        finally:
+            manager.stop()
+
+        self.assertIn("202", line)
+        self.assertTrue(body["accepted"])
+
+
+class VerifyGuardTests(unittest.TestCase):
+    """Single-flight verify: same 202/409 contract as single-probe."""
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path="noop-vguard-singbox.json",
+                        nodes_path="noop-vguard-nodes.json",
+                        state_path="noop-vguard-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _post(self, manager, path):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        headers = (f"POST {path} HTTP/1.1\r\nContent-Length: 0\r\n"
+                   f"Authorization: Bearer {self.TOKEN}\r\n")
+        client = FakeClient()
+        manager._handle_http(client, (headers + "\r\n").encode("latin-1"))
+        head, _, body = client.sent.partition(b"\r\n\r\n")
+        return head.decode("latin-1").split("\r\n")[0], json.loads(body.decode())
+
+    def test_verify_double_post_gets_409_then_202_after_done(self) -> None:
+        gate = threading.Event()
+        manager = self._manager(
+            verify_fn=lambda endpoint: gate.wait(timeout=30) or ("9.9.9.9", 1))
+        try:
+            manager._nodes = [{"server": "203.0.113.11", "server_port": 443,
+                               "endpoint": {"tag": "vpngate-0"}}]
+            line1, body1 = self._post(manager, "/api/verify")
+            line2, body2 = self._post(manager, "/api/verify")
+            gate.set()
+            manager._verify_thread.join(timeout=30)
+            line3, body3 = self._post(manager, "/api/verify")
+            manager._verify_thread.join(timeout=30)
+        finally:
+            gate.set()
+            manager.stop()
+
+        self.assertIn("202", line1)
+        self.assertTrue(body1["accepted"])
+        self.assertIn("409", line2)
+        self.assertFalse(body2["accepted"])
+        self.assertIn("202", line3)
+        self.assertTrue(body3["accepted"])
+
+
+class HttpPostCapTests(unittest.TestCase):
+    """POSTs are capped; cheap GETs (healthz/status) never starve."""
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def setUp(self) -> None:
+        self.manager = RailwayManager(
+            port=0, mixed_port=get_free_port(), admin_token=self.TOKEN,
+            start_singbox=False, auto_refresh=False, fetch_on_start=False,
+            config_path="noop-cap-singbox.json",
+            nodes_path="noop-cap-nodes.json",
+            state_path="noop-cap-state.json")
+        self.port = self.manager.start()
+
+    def tearDown(self) -> None:
+        for _ in range(64):
+            try:
+                self.manager._post_slots.release()
+            except ValueError:
+                break
+        self.manager.stop()
+
+    def _request(self, method, path, body=None, token=None):
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        with sock:
+            headers = f"{method} {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
+            if token is not None:
+                headers += f"Authorization: Bearer {token}\r\n"
+            if body is not None:
+                headers += f"Content-Length: {len(body)}\r\n"
+            sock.sendall(headers.encode() + b"\r\n" + (body or b""))
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        return response
+
+    def _fill_post_slots(self):
+        for _ in range(64):
+            if not self.manager._post_slots.acquire(blocking=False):
+                break
+
+    def test_healthz_bypasses_full_post_cap(self) -> None:
+        self.manager.status["endpoints"] = [{"tag": "vpngate-0"}]
+        self._fill_post_slots()
+        try:
+            response = self._request("GET", "/healthz")
+        finally:
+            pass
+
+        self.assertIn(b"200 OK", response)
+
+    def test_post_over_cap_returns_503_without_running(self) -> None:
+        self._fill_post_slots()
+        before = self.manager.status["refresh_ok"]
+        response = self._request("POST", "/api/refresh", body=b"{}",
+                                 token=self.TOKEN)
+
+        self.assertIn(b"503", response)
+        self.assertEqual(before, self.manager.status["refresh_ok"])
+
+    def test_get_status_unaffected_by_full_post_cap(self) -> None:
+        self._fill_post_slots()
+        response = self._request("GET", "/api/status", token=self.TOKEN)
+
+        self.assertIn(b"200 OK", response)
 
 
 if __name__ == "__main__":
