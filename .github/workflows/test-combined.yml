@@ -388,6 +388,41 @@ jobs:
           curl -m 10 -s -X POST -H "Authorization: Bearer smoke-admin-token-0123456789" \
             http://127.0.0.1:3000/api/switch -d '{"tag":"auto"}' | grep -q '"ok": true'
           echo "switch-to-auto OK"
+      - name: Fix verification - PORT refusal and defaults
+        run: |
+          # Colliding PORT must refuse to start with a clear message.
+          docker run -d --name port-refuse -p 18091:8080 \
+            -e PORT=8080 -e PROXY_USER=u -e PROXY_PASS=0123456789abcdef \
+            combined-railway:test
+          sleep 8
+          if docker inspect -f '{{.State.Running}}' port-refuse | grep -q true; then
+            echo "colliding PORT=8080 should have exited"; docker rm -f port-refuse; exit 1
+          fi
+          docker logs port-refuse 2>&1 | grep -q "collides" || {
+            echo "missing collision message:"; docker logs port-refuse 2>&1 | tail -n 10; exit 1; }
+          echo "PORT refusal OK"
+          docker rm -f port-refuse || true
+          # Unset PORT must default to 3000 and boot through a dead primary
+          # mirror (proves SNAPSHOT_URLS fallback live).
+          docker run -d --name mirror-fallback -p 13000:3000 \
+            -e PROXY_USER=u -e PROXY_PASS=0123456789abcdef \
+            -e ADMIN_TOKEN=mirror-admin-token-0123456789 \
+            -e REAL_TOPK=0 \
+            -e SNAPSHOT_URLS="https://127.0.0.1:9/unreachable,https://www.vpngate.net/api/iphone/" \
+            combined-railway:test
+          for i in $(seq 1 30); do
+            if curl -m 5 -s http://127.0.0.1:13000/healthz | grep -q "^ok$"; then
+              echo "mirror-fallback healthz OK after ~$((i * 10))s"
+              break
+            fi
+            sleep 10
+          done
+          curl -m 10 -s http://127.0.0.1:13000/healthz | grep -q "^ok$" || {
+            echo "default-PORT boot or mirror fallback failed:"; docker logs mirror-fallback 2>&1 | tail -n 20; exit 1; }
+          curl -m 10 -s -H "Authorization: Bearer mirror-admin-token-0123456789" \
+            http://127.0.0.1:13000/api/status | python3 -c "import json,sys; s=json.load(sys.stdin); assert s['refresh_ok']>=1, s"
+          echo "mirror fallback OK (default PORT 3000, refresh_ok>=1)"
+          docker rm -f mirror-fallback || true
           echo "--- container log tail ---"
           docker logs combined-test 2>&1 | tail -n 10
       - name: Cleanup
@@ -593,6 +628,71 @@ jobs:
           assert probe["state"] == "done" and probe["tag"], \
               "trial: single probe did not finish"
           EOF
+      - name: Fix verification - single-flight 409s
+        run: |
+          # A second verify while one runs must be rejected, not stacked.
+          code1=$(curl -m 10 -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer trial-admin-token-0123456789" \
+            http://127.0.0.1:3000/api/verify)
+          code2=$(curl -m 10 -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer trial-admin-token-0123456789" \
+            http://127.0.0.1:3000/api/verify)
+          echo "verify codes: $code1 then $code2"
+          [ "$code1" = "202" ] && [ "$code2" = "409" ] || {
+            echo "expected 202 then 409 for stacked verify"; exit 1; }
+          echo "verify single-flight 409 OK"
+          # Same for single-probe on the same tag.
+          TAG=$(python3 -c "import json;print(json.load(open('/tmp/trial-single.json'))['probe']['tag'])")
+          code1=$(curl -m 10 -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer trial-admin-token-0123456789" \
+            -d "{\"tag\":\"$TAG\"}" http://127.0.0.1:3000/api/probe)
+          code2=$(curl -m 10 -s -o /dev/null -w "%{http_code}" -X POST \
+            -H "Authorization: Bearer trial-admin-token-0123456789" \
+            -d "{\"tag\":\"$TAG\"}" http://127.0.0.1:3000/api/probe)
+          echo "probe codes: $code1 then $code2"
+          [ "$code1" = "202" ] && [ "$code2" = "409" ] || {
+            echo "expected 202 then 409 for stacked probe"; exit 1; }
+          echo "probe single-flight 409 OK"
+          sleep 5
+      - name: Fix verification - tags unique, memory metric, no loopback
+        run: |
+          curl -m 10 -s -H "Authorization: Bearer trial-admin-token-0123456789" \
+            http://127.0.0.1:3000/api/status -o /tmp/trial-verify.json
+          python3 - <<'EOF'
+          import json
+          s = json.load(open("/tmp/trial-verify.json"))
+          tags = [e["tag"] for e in s["endpoints"]]
+          assert len(tags) == len(set(tags)), f"duplicate tags: {tags}"
+          print(f"tag uniqueness OK: {len(tags)} endpoints")
+          rss = s["memory"]["rss_mb"]
+          assert isinstance(rss, (int, float)) and rss > 0, s["memory"]
+          print(f"memory metric OK: {rss} MB")
+          assert isinstance(s.get("threads"), int) and s["threads"] > 0
+          print(f"thread metric OK: {s['threads']} threads")
+          EOF
+          n=$(docker exec combined-trial cat /app/singbox-railway.json | grep -c chain-socks || true)
+          [ "$n" = "0" ] || { echo "loopback chain-socks still in serving config"; exit 1; }
+          echo "no-loopback OK"
+      - name: Fix verification - graceful drain on stop
+        run: |
+          # Hold one idle SOCKS connection, then stop: shutdown must drain
+          # (~10s, logged) instead of cutting instantly or hanging to timeout.
+          (exec 3<>/dev/tcp/127.0.0.1/3000; printf '\x05\x01\x00' >&3; sleep 60) &
+          HOLDER=$!
+          sleep 3
+          start=$(date +%s)
+          docker stop -t 30 combined-trial
+          code=$?
+          end=$(date +%s)
+          elapsed=$((end - start))
+          kill $HOLDER 2>/dev/null || true
+          echo "stop exit=$code elapsed=${elapsed}s"
+          [ $code -eq 0 ] || exit 1
+          [ "$elapsed" -ge 9 ] || { echo "stop too fast, drain did not run"; exit 1; }
+          [ "$elapsed" -lt 30 ] || { echo "stop hit the timeout, drain hung"; exit 1; }
+          docker logs combined-trial 2>&1 | grep -q "mux drain" || {
+            echo "missing drain log line:"; docker logs combined-trial 2>&1 | tail -n 10; exit 1; }
+          echo "graceful drain OK (${elapsed}s, mux drain logged)"
       - name: Cleanup
         if: always()
         run: |
