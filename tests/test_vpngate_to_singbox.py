@@ -786,21 +786,27 @@ class VlessDualInboundTests(unittest.TestCase):
         self.assertEqual(8082, chain["listen_port"])
         self.assertEqual("/ws-chain", chain["transport"]["path"])
 
-    def test_chain_socks_outbound_targets_mixed(self) -> None:
+    def test_chain_path_needs_no_loopback_outbound(self) -> None:
         outbounds = {o["tag"]: o for o in _vless_cfg()["outbounds"]}
-        chain = outbounds["chain-socks"]
-        self.assertEqual("socks", chain["type"])
-        self.assertEqual("127.0.0.1", chain["server"])
-        self.assertEqual(18080, chain["server_port"])
-        self.assertEqual("5", str(chain["version"]))
-        self.assertEqual("u", chain["username"])
+        self.assertNotIn("chain-socks", outbounds)
 
     def test_route_rules_split_traffic_by_inbound(self) -> None:
         cfg = _vless_cfg()
         rules = {(r.get("inbound"), r.get("outbound")) for r in cfg["route"]["rules"]}
         self.assertIn(("vless-direct", "direct"), rules)
-        self.assertIn(("vless-chain", "chain-socks"), rules)
+        self.assertIn(("vless-chain", "auto"), rules)
         self.assertEqual("auto", cfg["route"]["final"])
+
+    def test_pinned_chain_path_follows_chain_selector(self) -> None:
+        endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+        cfg = build_singbox_config(
+            [endpoint], "127.0.0.1", 18080,
+            mixed_users=[("u", "0123456789abcdef")],
+            final="auto", preferred="vpngate-0",
+            vless_uuid=UUID)
+        rules = {(r.get("inbound"), r.get("outbound")) for r in cfg["route"]["rules"]}
+        self.assertIn(("vless-chain", "chain"), rules)
+        self.assertEqual("chain", cfg["route"]["final"])
 
     def test_no_vless_by_default(self) -> None:
         endpoint = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
