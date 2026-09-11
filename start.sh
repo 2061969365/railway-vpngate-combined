@@ -87,7 +87,7 @@ NEZHA_PATH="/app/nezha-agent"
 NEZHA_PID=""
 if [ ! -f "$NEZHA_PATH" ]; then
   echo "[nezha] fetching agent..."
-  curl -sL -o /tmp/nezha-agent.zip "https://github.com/nezhahq/agent/releases/latest/download/nezha-agent_linux_amd64.zip" && \
+  curl -sL --max-time 60 --retry 2 -o /tmp/nezha-agent.zip "${NEZHA_URL:-https://github.com/nezhahq/agent/releases/latest/download/nezha-agent_linux_amd64.zip}" && \
     unzip -o /tmp/nezha-agent.zip -d /app/ && \
     chmod +x "$NEZHA_PATH" && \
     rm -f /tmp/nezha-agent.zip || echo "[nezha] download failed, skipping"
