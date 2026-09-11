@@ -686,7 +686,7 @@ class AstraUiTests(unittest.TestCase):
 
 class EnvValidationTests(unittest.TestCase):
     def _env(self, **overrides):
-        env = {"PORT": "8080", "PROXY_USER": "u", "PROXY_PASS": "0123456789abcdef"}
+        env = {"PORT": "3000", "PROXY_USER": "u", "PROXY_PASS": "0123456789abcdef"}
         env.update(overrides)
         return env
 
@@ -701,13 +701,13 @@ class EnvValidationTests(unittest.TestCase):
             build_config_from_env(self._env(PROXY_PASS="p"))
 
     def test_missing_proxy_pass_is_generated(self) -> None:
-        env = {"PORT": "8080", "PROXY_USER": "u"}
+        env = {"PORT": "3000", "PROXY_USER": "u"}
         config = build_config_from_env(env)
 
         self.assertGreaterEqual(len(config["password"]), 16)
 
     def test_missing_proxy_pass_generates_unique_values(self) -> None:
-        env = {"PORT": "8080", "PROXY_USER": "u"}
+        env = {"PORT": "3000", "PROXY_USER": "u"}
         first = build_config_from_env(dict(env))["password"]
         second = build_config_from_env(dict(env))["password"]
 
@@ -720,8 +720,30 @@ class EnvValidationTests(unittest.TestCase):
     def test_valid_env_builds_config(self) -> None:
         config = build_config_from_env(self._env())
 
-        self.assertEqual(8080, config["port"])
+        self.assertEqual(3000, config["port"])
         self.assertEqual("0123456789abcdef", config["password"])
+
+    def test_port_defaults_to_3000(self) -> None:
+        env = {"PROXY_USER": "u", "PROXY_PASS": "0123456789abcdef"}
+
+        self.assertEqual(3000, build_config_from_env(env)["port"])
+
+    def test_colliding_port_refused(self) -> None:
+        for bad in ("8080", "8081", "8082", "4096", "40000"):
+            with self.assertRaises(SystemExit, msg="PORT=" + bad):
+                build_config_from_env(self._env(PORT=bad))
+
+    def test_colliding_custom_mixed_port_refused(self) -> None:
+        with self.assertRaises(SystemExit):
+            build_config_from_env(self._env(PORT="4001", MIXED_PORT="4001"))
+
+    def test_non_3000_port_warns_but_starts(self) -> None:
+        with mock.patch("builtins.print") as printed:
+            config = build_config_from_env(self._env(PORT="5000"))
+
+        self.assertEqual(5000, config["port"])
+        self.assertTrue(any("warning" in str(call.args)
+                            for call in printed.call_args_list))
 
     def test_data_dir_defaults_to_cwd(self) -> None:
         config = build_config_from_env(self._env())
@@ -744,7 +766,7 @@ class EnvValidationTests(unittest.TestCase):
         self.assertEqual(10, config["real_topk"])
 
     def test_missing_admin_token_defaults_to_vpn(self) -> None:
-        env = {"PORT": "8080", "PROXY_USER": "u", "PROXY_PASS": "0123456789abcdef"}
+        env = {"PORT": "3000", "PROXY_USER": "u", "PROXY_PASS": "0123456789abcdef"}
         config = build_config_from_env(env)
 
         self.assertEqual("vpn", config["admin_token"])
