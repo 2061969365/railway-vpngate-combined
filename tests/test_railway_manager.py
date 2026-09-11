@@ -2381,5 +2381,171 @@ class HttpPostCapTests(unittest.TestCase):
         self.assertIn(b"200 OK", response)
 
 
+class SyncProbeTagTests(unittest.TestCase):
+    """_sync_probe_results must not collide with stable tags."""
+
+    def _manager(self):
+        return RailwayManager(
+            port=0, mixed_port=get_free_port(),
+            start_singbox=False, auto_refresh=False, fetch_on_start=False,
+            config_path="noop-sync-singbox.json",
+            nodes_path="noop-sync-nodes.json",
+            state_path="noop-sync-state.json")
+
+    def test_new_server_takes_next_free_tag(self) -> None:
+        manager = self._manager()
+        try:
+            manager.status["endpoints"] = [
+                {"tag": "vpngate-0", "server": "1.1.1.1", "server_port": 443,
+                 "country": "X", "country_short": "X", "latency_ms": 1,
+                 "real_latency_ms": 1, "speed": 1}]
+            nodes = [{"server": "2.2.2.2", "server_port": 443,
+                      "country": "Y", "country_short": "Y",
+                      "latency_ms": 2, "real_latency_ms": 22, "speed": 2},
+                     {"server": "3.3.3.3", "server_port": 443,
+                      "country": "Z", "country_short": "Z",
+                      "latency_ms": 3, "real_latency_ms": None, "speed": 3}]
+            manager._sync_probe_results(nodes)
+            tags = [ep["tag"] for ep in manager.status["endpoints"]]
+        finally:
+            manager.stop()
+
+        self.assertEqual(3, len(tags))
+        self.assertEqual(3, len(set(tags)))
+        self.assertIn("vpngate-0", tags)
+        self.assertTrue(all(t.startswith("vpngate-") for t in tags))
+
+
+class SnapshotFallbackTests(unittest.TestCase):
+    """SNAPSHOT_URLS: try mirrors in order, all must be https."""
+
+    def test_fetch_falls_through_to_second_mirror(self) -> None:
+        manager = RailwayManager(
+            port=0, mixed_port=get_free_port(),
+            start_singbox=False, auto_refresh=False, fetch_on_start=False,
+            snapshot_url="https://primary.example/x",
+            snapshot_urls=["https://primary.example/x",
+                           "https://mirror.example/x"],
+            config_path="noop-fb-singbox.json",
+            nodes_path="noop-fb-nodes.json",
+            state_path="noop-fb-state.json")
+        try:
+            def fetch(url, timeout):
+                if "primary" in url:
+                    raise TimeoutError("primary down")
+                return "mirror-csv"
+            result = manager._fetch_with_retry(fetch)
+        finally:
+            manager.stop()
+
+        self.assertEqual("mirror-csv", result)
+
+    def test_all_mirrors_down_raises_last_error(self) -> None:
+        manager = RailwayManager(
+            port=0, mixed_port=get_free_port(),
+            start_singbox=False, auto_refresh=False, fetch_on_start=False,
+            snapshot_urls=["https://a.example/x", "https://b.example/x"],
+            config_path="noop-fb2-singbox.json",
+            nodes_path="noop-fb2-nodes.json",
+            state_path="noop-fb2-state.json")
+        try:
+            with self.assertRaises(ConnectionError):
+                manager._fetch_with_retry(
+                    lambda url, timeout: (_ for _ in ()).throw(
+                        ConnectionError("down: " + url)))
+        finally:
+            manager.stop()
+
+    def test_plain_http_mirror_refused(self) -> None:
+        with self.assertRaises(SystemExit):
+            build_config_from_env({"PROXY_PASS": "0123456789abcdef",
+                                   "SNAPSHOT_URLS": "https://a.example/x,"
+                                                    "http://evil.example/x"})
+
+    def test_mirror_list_parsed_from_env(self) -> None:
+        cfg = build_config_from_env({"PROXY_PASS": "0123456789abcdef",
+                                     "SNAPSHOT_URLS": "https://a.example/x ,"
+                                                      "https://b.example/x"})
+        self.assertEqual(["https://a.example/x", "https://b.example/x"],
+                         cfg["snapshot_urls"])
+
+
+class DrainTests(unittest.TestCase):
+    """stop() drains data-plane mux conns instead of cutting them."""
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(),
+                        start_singbox=False, auto_refresh=False,
+                        fetch_on_start=False,
+                        config_path="noop-drain-singbox.json",
+                        nodes_path="noop-drain-nodes.json",
+                        state_path="noop-drain-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def test_drain_waits_for_inflight_then_returns_true(self) -> None:
+        manager = self._manager()
+        try:
+            manager._mux_inflight = 1
+            timer = threading.Timer(0.2, lambda: setattr(manager, "_mux_inflight", 0))
+            timer.start()
+            try:
+                self.assertTrue(manager._drain(timeout=5))
+            finally:
+                timer.join(timeout=5)
+        finally:
+            manager.stop()
+
+    def test_drain_times_out_returns_false(self) -> None:
+        manager = self._manager()
+        try:
+            manager._mux_inflight = 2
+            self.assertFalse(manager._drain(timeout=0.1))
+        finally:
+            manager.stop()
+
+
+class MemoryMetricTests(unittest.TestCase):
+    """status_snapshot carries a memory watermark (None where unavailable)."""
+
+    def test_snapshot_has_memory_key(self) -> None:
+        manager = RailwayManager(
+            port=0, mixed_port=get_free_port(),
+            start_singbox=False, auto_refresh=False, fetch_on_start=False,
+            config_path="noop-mem-singbox.json",
+            nodes_path="noop-mem-nodes.json",
+            state_path="noop-mem-state.json")
+        try:
+            memory = manager.status_snapshot()["memory"]
+        finally:
+            manager.stop()
+
+        self.assertIn("rss_mb", memory)
+        self.assertTrue(memory["rss_mb"] is None
+                        or isinstance(memory["rss_mb"], (int, float)))
+
+
+class StderrRotationTests(unittest.TestCase):
+    """Full stderr logs rotate to .prev instead of being deleted."""
+
+    def test_oversize_log_moves_to_prev(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "singbox-railway.json.stderr.log")
+            with open(path, "wb") as handle:
+                handle.write(b"x" * (200 * 1024 + 1))
+            RailwayManager._rotate_stderr_file(path)
+            self.assertFalse(os.path.exists(path))
+            self.assertTrue(os.path.exists(path + ".prev"))
+
+    def test_small_log_left_alone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = os.path.join(tmpdir, "singbox-railway.json.stderr.log")
+            with open(path, "wb") as handle:
+                handle.write(b"x" * 100)
+            RailwayManager._rotate_stderr_file(path)
+            self.assertTrue(os.path.exists(path))
+            self.assertFalse(os.path.exists(path + ".prev"))
+
+
 if __name__ == "__main__":
     unittest.main()
