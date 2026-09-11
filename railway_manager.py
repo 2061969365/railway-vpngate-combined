@@ -101,8 +101,22 @@ body::before{content:"";position:fixed;inset:0;z-index:-1;background:radial-grad
 .btn.busy{animation:pulse 1.1s ease-in-out infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
 #pills{display:flex;gap:10px;margin:14px 0;flex-wrap:wrap}
-#pills span{border:1px solid rgba(255,255,255,.16);border-radius:999px;padding:7px 18px;font-size:13px;color:#ddd;cursor:pointer;background:rgba(255,255,255,.04)}
-#pills span.on{background:linear-gradient(92deg,#6366f1,#0ea5e9);color:#fff;border-color:transparent}
+#scope{margin:14px 0;min-width:180px}
+.opbtn{min-height:28px;padding:5px 16px;border-radius:999px;border:1px solid rgba(138,180,255,.5);background:rgba(138,180,255,.08);color:#8ab4ff;font-size:12.5px;cursor:pointer;margin-right:8px;white-space:nowrap}
+.opbtn:hover{background:rgba(138,180,255,.18)}
+.opbtn:disabled{opacity:.45;cursor:not-allowed}
+.ip{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+#thinbar{display:none;height:2px;border-radius:999px;background:rgba(255,255,255,.08);overflow:hidden;margin:10px 0 2px}
+#thinbar.show{display:block}
+#thinbar i{display:block;height:100%;width:30%;border-radius:999px;background:linear-gradient(90deg,#6366f1,#22d3ee);animation:slide 1s ease-in-out infinite}
+@keyframes slide{0%{margin-left:-30%}100%{margin-left:100%}}
+.spin{display:inline-block;width:12px;height:12px;border:2px solid rgba(255,255,255,.25);border-top-color:#fff;border-radius:50%;animation:rot .7s linear infinite;vertical-align:-2px;margin-right:6px}
+@keyframes rot{to{transform:rotate(360deg)}}
+table.bench.loading tbody{opacity:.55}
+#switch-undo{margin-top:8px;font-size:13px;color:#a8adbd}
+#switch-undo b{font-family:ui-monospace,Menlo,Consolas,monospace;color:#e5e7eb}
+#undo-link{color:#8ab4ff;cursor:pointer;text-decoration:none}
+#undo-link:hover{text-decoration:underline}
 .actions{display:flex;gap:12px;margin-top:16px;flex-wrap:wrap}
 #btn-verify{background:linear-gradient(92deg,#6366f1,#0ea5e9);color:#fff;border-radius:999px;padding:10px 26px;font-size:14px;font-weight:600;cursor:pointer;border:none;box-shadow:0 6px 24px rgba(99,102,241,.45)}
 #btn-refresh{border:1px solid rgba(255,255,255,.2);border-radius:999px;padding:10px 26px;font-size:14px;color:#fff;background:rgba(255,255,255,.07);cursor:pointer}
@@ -114,8 +128,6 @@ table.bench th,table.bench td{text-align:left;padding:11px 14px;border-bottom:1p
 table.bench th{color:#8b91a5;font-weight:500;font-size:12px}
 table.bench tr:hover td{background:rgba(255,255,255,.035)}
 table.bench td.hl{color:#fff;font-weight:600}
-table.bench td.op a{color:#8ab4ff;cursor:pointer;text-decoration:none;margin-right:12px}
-table.bench td.op a:hover{text-decoration:underline}
 .badge{display:inline-block;font-size:11px;border-radius:999px;padding:2px 10px;margin-left:8px;background:linear-gradient(92deg,#6366f1,#0ea5e9);color:#fff}
 .badge.probing{background:rgba(251,191,36,.18);color:#fbbf24;border:1px solid rgba(251,191,36,.4)}
 #probe-progress{display:none;margin:14px 0 4px}
@@ -149,9 +161,6 @@ table.bench td.op a:hover{text-decoration:underline}
 @media(max-width:768px){#hero-kicker{font-size:34px}.wrap{padding:20px 14px 44px}.stats{grid-template-columns:repeat(2,1fr)}#topnav .links{display:none}}
 #bench-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 table.bench{min-width:560px}
-table.bench td.op a{display:inline-block;padding:6px 10px;margin-right:4px;border-radius:8px}
-table.bench td.op a.disabled{opacity:.38;cursor:not-allowed;text-decoration:none}
-table.bench td.op a.disabled:hover{text-decoration:none}
 @media(max-width:640px){.wrap{padding:16px 12px 40px}.glass-card{padding:20px 16px;border-radius:18px}#hero-kicker{font-size:30px}.stats{gap:10px}.stat{padding:12px 14px}.stat .v{font-size:20px}#node-search{width:100%;max-width:none}.actions .btn{flex:1 1 100%;text-align:center}#topnav{padding:12px 16px;gap:14px}#topnav .live{display:none}.glass-card,.stat{backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}#toast{right:max(12px,env(safe-area-inset-right));bottom:max(12px,env(safe-area-inset-bottom));left:max(12px,env(safe-area-inset-left))}.toast-msg{max-width:none}}
 /* v2 新增元素（与深色皮肤同语言） */
 .num,.stat .v{font-variant-numeric:tabular-nums}
@@ -172,8 +181,8 @@ section{scroll-margin-top:130px}
 #spark{width:100%;height:64px;display:block}
 .rate-legend{display:flex;gap:18px;font-size:12px;color:#8b91a5;margin-top:8px}
 .rate-legend i{display:inline-block;width:18px;height:2px;vertical-align:middle;margin-right:6px}
-#sortsel{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);color:#fff;border-radius:10px;padding:8px 10px;font-size:13px}
-#sortsel option{background:#121826}
+#sortsel,#scope{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);color:#fff;border-radius:10px;padding:8px 10px;font-size:13px}
+#sortsel option,#scope option{background:#121826}
 .node-count{margin-left:auto;font-size:12px;color:#8b91a5}
 table.bench th.sortable{cursor:pointer;user-select:none}
 table.bench th.sortable:hover{color:#fff}
@@ -195,47 +204,78 @@ tr.skel td{padding:13px 14px}
 .subrow code{flex:1;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;color:#8b91a5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .subrow .btn{padding:7px 18px;font-size:12.5px}
 :focus-visible{outline:2px solid #67e8f9;outline-offset:2px}
-/* 浅色模式：同一套架构，纸面皮肤 */
-html[data-theme="light"] body{background:#eef1f7;color:#0f172a}
-html[data-theme="light"] body::before{background:radial-gradient(ellipse 55% 40% at 75% 8%,rgba(99,102,241,.14),transparent 70%),radial-gradient(ellipse 45% 35% at 12% 25%,rgba(34,211,238,.12),transparent 70%),radial-gradient(ellipse 50% 45% at 50% 100%,rgba(16,185,129,.1),transparent 70%),#eef1f7}
-html[data-theme="light"] #topnav,html[data-theme="light"] #statusbar{background:rgba(255,255,255,.78);border-bottom-color:rgba(15,23,42,.09)}
-html[data-theme="light"] #topnav .links a,html[data-theme="light"] #statusbar{color:#52607a}
-html[data-theme="light"] #topnav .links a:hover{color:#0f172a;background:rgba(15,23,42,.06)}
-html[data-theme="light"] #topnav .links a.on{color:#0f172a;background:rgba(15,23,42,.08)}
-html[data-theme="light"] #btn-lock,html[data-theme="light"] #btn-theme{border-color:rgba(15,23,42,.18);background:rgba(15,23,42,.05);color:#334155}
-html[data-theme="light"] #btn-lock:hover,html[data-theme="light"] #btn-theme:hover{background:rgba(15,23,42,.1)}
-html[data-theme="light"] #topnav .live{color:#047857;border-color:rgba(4,120,87,.4)}
-html[data-theme="light"] #topnav .logo{background:linear-gradient(90deg,#4f46e5,#0284c7);-webkit-background-clip:text;background-clip:text;color:transparent}
-html[data-theme="light"] .glass-card,html[data-theme="light"] .stat{background:rgba(255,255,255,.72);border-color:rgba(15,23,42,.09);box-shadow:0 12px 32px rgba(15,23,42,.08)}
-html[data-theme="light"] .glass-card .desc,html[data-theme="light"] .stat .k,html[data-theme="light"] table.bench th,html[data-theme="light"] #history-line,html[data-theme="light"] #history-list li,html[data-theme="light"] #probe-progress .txt,html[data-theme="light"] .rate-legend,html[data-theme="light"] .empty,html[data-theme="light"] .footer{color:#5b6b85}
-html[data-theme="light"] #history-list li b{color:#1e293b}
-html[data-theme="light"] #hero-kicker{background:linear-gradient(92deg,#0f172a,#4f46e5 60%,#0284c7);-webkit-background-clip:text;background-clip:text;color:transparent}
-html[data-theme="light"] #hero-sub{color:#475569}
-html[data-theme="light"] #verify-result{color:#047857}
-html[data-theme="light"] .route-strip .rt{background:rgba(15,23,42,.04);border-color:rgba(15,23,42,.09);color:#334155}
-html[data-theme="light"] .route-strip .rt b{color:#64748b}
-html[data-theme="light"] .route-strip .rt code{color:#0284c7}
-html[data-theme="light"] .btn{border-color:rgba(15,23,42,.18);color:#0f172a;background:rgba(15,23,42,.05)}
-html[data-theme="light"] .btn:hover{background:rgba(15,23,42,.1)}
-html[data-theme="light"] #node-search,html[data-theme="light"] #sortsel,html[data-theme="light"] #loglevel{background:rgba(15,23,42,.05);border-color:rgba(15,23,42,.14);color:#0f172a}
-html[data-theme="light"] #sortsel option{background:#fff}
-html[data-theme="light"] #pills span{border-color:rgba(15,23,42,.18);color:#475569;background:rgba(15,23,42,.04)}
-html[data-theme="light"] table.bench th,html[data-theme="light"] table.bench td{border-bottom-color:rgba(15,23,42,.08)}
-html[data-theme="light"] table.bench tr:hover td{background:rgba(15,23,42,.04)}
-html[data-theme="light"] table.bench tr.pinned td{background:rgba(79,70,229,.09)}
-html[data-theme="light"] table.bench td.hl{color:#0f172a}
-html[data-theme="light"] table.bench td.op a{color:#1d4ed8}
-html[data-theme="light"] table.bench th.sortable:hover{color:#0f172a}
-html[data-theme="light"] .cc{color:#0284c7;border-color:rgba(2,132,199,.35)}
-html[data-theme="light"] .badge.unmeasured{background:rgba(2,132,199,.12);color:#0284c7}
-html[data-theme="light"] .lat .bar{background:rgba(15,23,42,.1)}
-html[data-theme="light"] .l-good{color:#047857}html[data-theme="light"] .l-mid{color:#b45309}html[data-theme="light"] .l-bad{color:#dc2626}html[data-theme="light"] .l-na{color:#94a3b8}
-html[data-theme="light"] .skel .sk{background:linear-gradient(90deg,rgba(15,23,42,.05),rgba(15,23,42,.12),rgba(15,23,42,.05));background-size:200% 100%}
-html[data-theme="light"] .subrow{background:rgba(15,23,42,.04);border-color:rgba(15,23,42,.09)}
-html[data-theme="light"] .subrow code{color:#64748b}
-html[data-theme="light"] #statusbar b{color:#0f172a}
-html[data-theme="light"] #statusbar .dot{background:#047857;box-shadow:0 0 8px #047857}
-html[data-theme="light"] :focus-visible{outline-color:#4f46e5}
+/* 浅色模式：Google 式白——纯白底、无渐变、无毛玻璃，蓝只用 #1a73e8 一处 */
+html[data-theme="light"] body{background:#fff;color:#202124}
+html[data-theme="light"] body::before{display:none}
+html[data-theme="light"] #topnav,html[data-theme="light"] #statusbar{background:#fff;border-bottom-color:#dadce0}
+html[data-theme="light"] #topnav .links a,html[data-theme="light"] #statusbar{color:#5f6368}
+html[data-theme="light"] #topnav .links a:hover{color:#202124;background:#f1f3f4}
+html[data-theme="light"] #topnav .links a.on{color:#1a73e8;background:#e8f0fe}
+html[data-theme="light"] #btn-lock,html[data-theme="light"] #btn-theme{border-color:#dadce0;background:#fff;color:#1a73e8}
+html[data-theme="light"] #btn-lock:hover,html[data-theme="light"] #btn-theme:hover{background:#f6fafe}
+html[data-theme="light"] #topnav .live{color:#188038;border-color:#188038}
+html[data-theme="light"] #topnav .logo{background:none;color:#1a73e8}
+html[data-theme="light"] .glass-card,html[data-theme="light"] .stat{background:#fff;border-color:#dadce0;box-shadow:0 1px 2px rgba(60,64,67,.15)}
+html[data-theme="light"] .glass-card .desc,html[data-theme="light"] .stat .k,html[data-theme="light"] table.bench th,html[data-theme="light"] #history-line,html[data-theme="light"] #history-list li,html[data-theme="light"] #probe-progress .txt,html[data-theme="light"] .rate-legend,html[data-theme="light"] .empty,html[data-theme="light"] .footer,html[data-theme="light"] .node-count{color:#5f6368}
+html[data-theme="light"] #history-list li{border-bottom-color:#e8eaed}
+html[data-theme="light"] #history-list li b{color:#202124}
+html[data-theme="light"] #hero-kicker{background:none;color:#202124}
+html[data-theme="light"] #hero-sub{color:#5f6368}
+html[data-theme="light"] #verify-result{color:#188038}
+html[data-theme="light"] #switch-undo{color:#5f6368}
+html[data-theme="light"] #switch-undo b{color:#202124}
+html[data-theme="light"] #undo-link{color:#1a73e8}
+html[data-theme="light"] #exit-card{background:#fff}
+html[data-theme="light"] .route-strip .rt{background:#f8f9fa;border-color:#e8eaed;color:#3c4043}
+html[data-theme="light"] .route-strip .rt b{color:#5f6368}
+html[data-theme="light"] .route-strip .rt code{color:#1a73e8}
+html[data-theme="light"] .btn{border-color:#dadce0;color:#1a73e8;background:#fff}
+html[data-theme="light"] .btn:hover{background:#f6fafe}
+html[data-theme="light"] .btn:active{transform:none}
+html[data-theme="light"] #btn-verify{background:#1a73e8;box-shadow:none}
+html[data-theme="light"] #btn-verify:hover{background:#1b66c9}
+html[data-theme="light"] #btn-fullprobe{border-color:#1a73e8;color:#1a73e8;background:#fff}
+html[data-theme="light"] #node-search,html[data-theme="light"] #sortsel,html[data-theme="light"] #scope,html[data-theme="light"] #loglevel{background:#fff;border-color:#dadce0;color:#202124}
+html[data-theme="light"] #sortsel option,html[data-theme="light"] #scope option{background:#fff}
+html[data-theme="light"] #thinbar{background:#e8eaed}
+html[data-theme="light"] #thinbar i{background:#1a73e8}
+html[data-theme="light"] #probe-progress .bar{background:#e8eaed}
+html[data-theme="light"] #probe-progress .fill{background:#1a73e8}
+html[data-theme="light"] table.bench th,html[data-theme="light"] table.bench td{border-bottom-color:#e8eaed}
+html[data-theme="light"] table.bench tr:hover td{background:#f6fafe}
+html[data-theme="light"] table.bench tr.pinned td{background:#e8f0fe}
+html[data-theme="light"] table.bench td.hl{color:#202124}
+html[data-theme="light"] .opbtn{border-color:#dadce0;background:#fff;color:#1a73e8}
+html[data-theme="light"] .opbtn:hover{background:#f6fafe}
+html[data-theme="light"] .opbtn:disabled{color:#9aa0a6;border-color:#e8eaed;background:#fff}
+html[data-theme="light"] .ip{color:#202124}
+html[data-theme="light"] table.bench th.sortable:hover{color:#202124}
+html[data-theme="light"] .cc{color:#1a73e8;border-color:#c2dbff}
+html[data-theme="light"] .badge{background:#e6f4ea;color:#188038}
+html[data-theme="light"] .badge.probing{background:#fef7e0;color:#b06000;border-color:#fde293}
+html[data-theme="light"] .badge.unmeasured{background:#e8f0fe;color:#1a73e8}
+html[data-theme="light"] .lat .bar{background:#e8eaed}
+html[data-theme="light"] .l-good{color:#188038}html[data-theme="light"] .l-mid{color:#e37400}html[data-theme="light"] .l-bad{color:#d93025}html[data-theme="light"] .l-na{color:#9aa0a6}
+html[data-theme="light"] #foot-cpu.l-good,html[data-theme="light"] #foot-mem.l-good{color:#188038}
+html[data-theme="light"] #foot-cpu.l-mid,html[data-theme="light"] #foot-mem.l-mid{color:#e37400}
+html[data-theme="light"] #foot-cpu.l-bad,html[data-theme="light"] #foot-mem.l-bad{color:#d93025}
+html[data-theme="light"] .skel .sk{background:linear-gradient(90deg,#e8eaed,#f1f3f4,#e8eaed);background-size:200% 100%}
+html[data-theme="light"] .subrow{background:#f8f9fa;border-color:#e8eaed}
+html[data-theme="light"] .subrow code{color:#5f6368}
+html[data-theme="light"] #statusbar b{color:#202124}
+html[data-theme="light"] #statusbar .dot{background:#188038;box-shadow:none}
+html[data-theme="light"] .spin{border-color:rgba(26,115,232,.25);border-top-color:#1a73e8}
+html[data-theme="light"] #logbox{background:#f8f9fa;border-color:#e8eaed}
+html[data-theme="light"] #logbox .t{color:#9aa0a6}
+html[data-theme="light"] #logbox .ok{color:#188038}html[data-theme="light"] #logbox .warn{color:#b06000}html[data-theme="light"] #logbox .err{color:#d93025}
+html[data-theme="light"] #login-gate{background:rgba(255,255,255,.9)}
+html[data-theme="light"] .login-card{background:#fff;border-color:#dadce0;box-shadow:0 1px 3px rgba(60,64,67,.2)}
+html[data-theme="light"] .login-card .logo{background:none;color:#1a73e8}
+html[data-theme="light"] .login-card .sub{color:#5f6368}
+html[data-theme="light"] #login-token{background:#fff;border-color:#dadce0;color:#202124}
+html[data-theme="light"] #btn-login{background:#1a73e8;box-shadow:none}
+html[data-theme="light"] #login-err{color:#d93025}
+html[data-theme="light"] :focus-visible{outline-color:#1a73e8}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
 </style></head>
@@ -249,6 +289,7 @@ html[data-theme="light"] :focus-visible{outline-color:#4f46e5}
 <div id="hero-kicker">—<br>—</div>
 <p id="hero-sub">loading…</p>
 <p id="verify-result"></p>
+<p id="switch-undo" hidden>已从 <b id="undo-from"></b> 切换到 <b id="undo-to"></b> · <a id="undo-link" onclick="onUndo()">撤销换回</a></p>
 <div class="route-strip" id="route-strip" hidden>
 <div class="rt"><b>/ws-node → Railway 本机</b><code id="route-direct">—</code></div>
 <div class="rt"><b>/ws-chain → VPN 节点</b><code id="route-chain">—</code></div>
@@ -273,10 +314,10 @@ html[data-theme="light"] :focus-visible{outline-color:#4f46e5}
 <div class="glass-card">
 <h2>可用节点</h2>
 <p class="desc">默认显示 Top30 实测节点（自动刷新只测前 30）。Speed 排名不等于可拨通，首选由 urltest 实测决定，多 endpoint 兜底；要测全部点「全量真测」。点击表头可排序，未测通节点不可切换。</p>
-<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><input id="node-search" placeholder="搜索 tag / 国家…" oninput="debouncedRefresh()"><select id="sortsel" aria-label="排序"><option value="real">按实测延迟</option><option value="hand">按握手延迟</option><option value="country">按国家</option><option value="alive">按存活时间</option></select><button id="btn-refresh" class="btn" onclick="refreshNow()">刷新节点</button><button id="btn-fullprobe" class="btn" onclick="fullProbeNow()">全量真测</button><span class="node-count" id="node-count"></span></div>
-<div id="pills"></div>
-<div id="probe-progress"><div class="bar"><div class="fill" id="probe-fill" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div><div class="txt" id="probe-txt"></div></div>
-<div id="bench-wrap"><table class="bench"><thead><tr><th class="sortable" data-k="tag">Endpoint</th><th class="sortable" data-k="country">国家</th><th class="sortable" data-k="hand">握手</th><th class="sortable" data-k="real">实测</th><th class="sortable" data-k="alive">存活</th><th>操作</th></tr></thead><tbody id="bench-body"></tbody></table></div>
+<div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><input id="node-search" placeholder="搜索 IP / 国家…" oninput="debouncedRefresh()"><select id="sortsel" aria-label="排序"><option value="real">按实测延迟</option><option value="hand">按握手延迟</option><option value="country">按国家</option><option value="alive">按存活时间</option></select><button id="btn-refresh" class="btn" onclick="refreshNow()">刷新节点</button><button id="btn-fullprobe" class="btn" onclick="fullProbeNow()">全量真测</button><span class="node-count" id="node-count"></span></div>
+<select id="scope" aria-label="范围"><option value="">全部国家</option></select>
+<div id="thinbar" aria-hidden="true"><i></i></div><div id="probe-progress"><div class="bar"><div class="fill" id="probe-fill" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div><div class="txt" id="probe-txt"></div></div>
+<div id="bench-wrap"><table class="bench"><thead><tr><th class="sortable" data-k="server">出口 IP</th><th class="sortable" data-k="country">国家</th><th class="sortable" data-k="hand">握手</th><th class="sortable" data-k="real">实测</th><th class="sortable" data-k="alive">存活</th><th>操作</th></tr></thead><tbody id="bench-body"></tbody></table></div>
 </div>
 </section>
 <section id="sec-logs" aria-label="日志">
@@ -291,8 +332,8 @@ html[data-theme="light"] :focus-visible{outline-color:#4f46e5}
 <div class="glass-card">
 <h2>订阅</h2>
 <p class="desc">双路 VLESS，一键复制。域名取当前访问 host。</p>
-<div class="subrow"><code id="sub-direct">—</code><button class="btn" onclick="copySub('direct')">复制</button></div>
-<div class="subrow"><code id="sub-chain">—</code><button class="btn" onclick="copySub('chain')">复制</button></div>
+<div class="subrow"><code id="sub-direct">—</code><button class="btn" onclick="copySub('direct',this)">复制</button></div>
+<div class="subrow"><code id="sub-chain">—</code><button class="btn" onclick="copySub('chain',this)">复制</button></div>
 </div>
 </section>
 <section id="sec-hist" aria-label="事件">
@@ -303,9 +344,9 @@ html[data-theme="light"] :focus-visible{outline-color:#4f46e5}
 <ul id="history-list"></ul>
 </div>
 </section>
-<div class="footer"><span id="foot-status">—</span><span> · 自用调试 · sing-box 内部协议栈 · 无 TUN</span></div>
+<div class="footer"><span id="foot-cpu" class="num">CPU —</span> · <span id="foot-mem" class="num">MEM —</span></div>
 </div>
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
 <script>
 var activeCountry = "";
 var lastStatus = null;
@@ -337,7 +378,7 @@ async function loginEnter() {
   const btn = document.getElementById("btn-login");
   const err = document.getElementById("login-err");
   const trial = input.value.trim();
-  if (!trial) { err.textContent = "请先填写 token"; return; }
+  if (!trial) { err.textContent = "请先填写 token"; input.focus(); return; }
   btn.disabled = true;
   btn.textContent = "验证中…";
   err.textContent = "";
@@ -348,6 +389,8 @@ async function loginEnter() {
   } catch (e) {
     localStorage.removeItem("admin_token");
     err.textContent = "token 不对，请重试";
+    input.select();
+    input.focus();
     const card = document.querySelector(".login-card");
     card.classList.remove("shake");
     void card.offsetWidth;
@@ -371,6 +414,7 @@ function toast(msg, isErr) {
   while (box.children.length >= 3) box.firstChild.remove();
   const el = document.createElement("div");
   el.className = "toast-msg" + (isErr ? " err" : "");
+  if (isErr) el.setAttribute("role", "alert");
   el.textContent = msg;
   box.appendChild(el);
   setTimeout(() => el.remove(), 4500);
@@ -411,6 +455,7 @@ function nodeQuery() { const el = document.getElementById("node-search"); return
 function sortVal(e) {
   if (sortKey === "country") return (e.country || "") + (e.tag || "");
   if (sortKey === "tag") return e.tag || "";
+  if (sortKey === "server") return e.server || "";
   if (sortKey === "hand") return e.latency_ms == null ? 1e9 : e.latency_ms;
   if (sortKey === "alive") return -(e.alive_seconds || 0);
   return e.real_latency_ms == null ? 1e9 : e.real_latency_ms;
@@ -431,6 +476,8 @@ function clearFilter() {
   activeCountry = "";
   const el = document.getElementById("node-search");
   if (el) el.value = "";
+  const sc = document.getElementById("scope");
+  if (sc) sc.value = "";
   renderFiltered();
 }
 async function refresh() {
@@ -450,13 +497,20 @@ function renderFiltered() {
 }
 function renderAll(s) {
   try {
+    const focusEl = document.activeElement;
+    let focusBack = null;
+    if (focusEl && focusEl.getAttribute) {
+      if (focusEl.id === "scope") focusBack = () => document.getElementById("scope").focus();
+      else if (focusEl.getAttribute("data-probe")) { const t = focusEl.getAttribute("data-probe"); focusBack = () => { const b = document.querySelector("[data-probe='" + t + "']"); if (b) b.focus(); }; }
+      else if (focusEl.getAttribute("data-switch")) { const t = focusEl.getAttribute("data-switch"); focusBack = () => { const b = document.querySelector("[data-switch='" + t + "']"); if (b) b.focus(); }; }
+    }
     if (pendingTag && s.preferred_tag === pendingTag && !(s.probe && s.probe.state === "running")) pendingTag = null;
     const eps = filteredEndpoints(s);
     const pref = s.endpoints.find(e => e.tag === s.preferred_tag) || eps[0];
     document.getElementById("hero-kicker").innerHTML =
       (pref ? esc(pref.country_short) + "<br>" + fmtMs(pref.real_latency_ms != null ? pref.real_latency_ms : pref.latency_ms) : "—<br>无节点");
     document.getElementById("hero-sub").textContent =
-      pref ? ("经 " + pref.tag + " 出站 · " + pref.server + ":" + pref.server_port + " · 存活 " + (pref.alive_seconds || 0) + "s") : "暂无可用节点";
+      pref ? ("出口 " + pref.server + ":" + pref.server_port + " · 存活 " + (pref.alive_seconds || 0) + "s") : "暂无可用节点";
     renderVerify(s.verify, pref);
     renderStatusbar(s, pref);
     renderTraffic(s);
@@ -469,14 +523,14 @@ function renderAll(s) {
     document.getElementById("stat-refresh").textContent = s.refresh_ok + "/" + s.refresh_fail;
     const byCountry = {};
     s.endpoints.forEach(e => { byCountry[e.country_short] = (byCountry[e.country_short] || 0) + 1; });
-    document.getElementById("pills").innerHTML =
-      '<span role="button" tabindex="0" aria-pressed="' + (activeCountry === "") + '" data-c="" class="' + (activeCountry === "" ? "on" : "") + '">全部 ' + s.endpoints.length + "</span>" +
-      s.countries.map(c => '<span role="button" tabindex="0" aria-pressed="' + (activeCountry === c.code) + '" data-c="' + c.code + '" class="' + (activeCountry === c.code ? "on" : "") + '">' + esc(c.name) + " " + (byCountry[c.code] || 0) + "</span>").join("");
-    document.querySelectorAll("#pills span").forEach(el => {
-      const pick = () => { activeCountry = el.getAttribute("data-c"); renderFiltered(); };
-      el.onclick = pick;
-      el.onkeydown = (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); pick(); } };
-    });
+    const scopeSel = document.getElementById("scope");
+    if (scopeSel) {
+      const codes = {};
+      (s.countries || []).forEach(c => { codes[c.code] = c.name; });
+      s.endpoints.forEach(e => { if (e.country_short && !codes[e.country_short]) codes[e.country_short] = e.country || e.country_short; });
+      scopeSel.innerHTML = '<option value="">全部国家 ' + s.endpoints.length + "</option>" +
+        Object.keys(codes).sort().map(code => '<option value="' + esc(code) + '"' + (activeCountry === code ? " selected" : "") + ">" + esc(code) + " " + (byCountry[code] || 0) + "</option>").join("");
+    }
     const probingTag = (s.probe && s.probe.state === "running") ? s.probe.tag : null;
     const rows = eps.map(e => {
       const t = safeTag(e.tag);
@@ -486,15 +540,16 @@ function renderAll(s) {
       const probing = (!isPending && e.tag === probingTag) ? '<span class="badge probing">测速中</span>' : "";
       const unmeasured = e.real_latency_ms == null;
       const unm = (!isPinned && !isPending && unmeasured) ? '<span class="badge unmeasured">未测通</span>' : "";
-      const disSw = unmeasured ? ' aria-disabled="true" class="disabled"' : "";
-      const disPb = (e.tag === probingTag) ? ' aria-disabled="true" class="disabled"' : "";
-      return "<tr class='" + (isPinned ? "pinned" : "") + (isPending ? " pending" : "") + "'><td class='hl'>" + esc(e.tag) + pinned + pending + probing + unm + "</td><td><span class='cc'>" + esc(e.country_short) + "</span>" + esc(e.country) + "</td><td class='hl'>" + fmtMs(e.latency_ms) +
+      const disSw = unmeasured ? " aria-disabled='true' disabled title='先测速再切换：该节点还未测通'" : "";
+      const disPb = (e.tag === probingTag) ? " aria-disabled='true' disabled" : "";
+      return "<tr class='" + (isPinned ? "pinned" : "") + (isPending ? " pending" : "") + "'><td class='hl'><span class='ip'>" + esc(e.server || e.tag) + "</span>" + pinned + pending + probing + unm + "</td><td><span class='cc'>" + esc(e.country_short) + "</span>" + esc(e.country) + "</td><td class='hl'>" + fmtMs(e.latency_ms) +
       "</td><td class='hl'>" + latBar(e.real_latency_ms) + "</td><td>" + (e.alive_seconds || 0) + "s</td>" +
-      "<td class='op'><a role='button' tabindex='0' data-probe='" + t + "'" + disPb + ">测速</a><a role='button' tabindex='0' data-switch='" + t + "'" + disSw + ">切换</a></td></tr>";
+      "<td class='op'><button class='opbtn' data-probe='" + t + "'" + disPb + ">测速</button><button class='opbtn' data-switch='" + t + "'" + disSw + ">切换</button></td></tr>";
     }).join("");
     document.getElementById("bench-body").innerHTML = rows ||
       '<tr><td colspan="6"><div class="empty">无匹配节点，换个关键词或 <a style="color:#8ab4ff;cursor:pointer" onclick="clearFilter()">清除筛选</a></div></td></tr>';
     document.getElementById("node-count").textContent = eps.length + " / " + s.endpoints.length;
+    if (focusBack) focusBack();
     renderProbeProgress(s.full_probe);
     document.getElementById("history-line").textContent =
       "refresh ok/fail: " + s.refresh_ok + "/" + s.refresh_fail + " · uptime: " + s.uptime_seconds + "s · error: " + (s.last_error || "—");
@@ -502,7 +557,17 @@ function renderAll(s) {
     document.getElementById("history-list").innerHTML = hist.length ?
       hist.map(h => "<li><b>" + esc(h.event) + "</b> " + esc(h.detail || "") + " · " + esc(h.ts || "") + "</li>").join("") :
       '<li style="color:#8b91a5">暂无事件</li>';
-    document.getElementById("foot-status").textContent = "uptime " + s.uptime_seconds + "s · refresh " + s.refresh_ok + "/" + s.refresh_fail;
+    const cpu = s.cpu || {}, mem = s.mem || {};
+    const cpuPct = cpu.pct, memPct = mem.pct;
+    const footCpu = document.getElementById("foot-cpu"), footMem = document.getElementById("foot-mem");
+    if (footCpu) {
+      footCpu.textContent = "CPU " + (cpu.model || "—") + " · " + (cpuPct == null ? "—" : cpuPct + "%");
+      footCpu.className = "num " + (cpuPct == null || cpuPct < 50 ? "l-good" : (cpuPct < 80 ? "l-mid" : "l-bad"));
+    }
+    if (footMem) {
+      footMem.textContent = "MEM " + (memPct == null ? "—" : memPct + "%");
+      footMem.className = "num " + (memPct == null || memPct < 70 ? "l-good" : (memPct < 88 ? "l-mid" : "l-bad"));
+    }
   } catch (e) {
     if (isAbort(e)) return;
     document.getElementById("hero-sub").textContent = "status fetch failed: " + e.message;
@@ -512,7 +577,9 @@ function renderAll(s) {
 function renderStatusbar(s, pref) {
   const exitIp = (s.verify && s.verify.exit_ip) || "—";
   document.getElementById("sb-exit").textContent = exitIp;
-  document.getElementById("sb-node").textContent = s.preferred_tag ? (s.preferred_tag + " · 已 pin") : (pref ? (pref.tag + " · 自动") : "—");
+  const pinEp = (s.endpoints || []).find(x => x.tag === s.preferred_tag) || {};
+  const pinIp = pinEp.server || s.preferred_tag;
+  document.getElementById("sb-node").textContent = s.preferred_tag ? (pinIp + " · 已 pin") : (pref ? ((pref.server || pref.tag) + " · 自动") : "—");
 }
 function renderTraffic(s) {
   const t = s.traffic || {};
@@ -551,9 +618,8 @@ function renderRoutes(s) {
   if (!strip) return;
   strip.hidden = false;
   document.getElementById("route-direct").textContent = location.hostname + " 本机";
-  const via = s.preferred_tag || "auto";
   const exitIp = (s.verify && s.verify.exit_ip) || "未验证";
-  document.getElementById("route-chain").textContent = "via " + via + " · " + exitIp;
+  document.getElementById("route-chain").textContent = exitIp;
 }
 function renderSub(s) {
   const sec = document.getElementById("sec-sub");
@@ -567,7 +633,7 @@ function renderSub(s) {
   document.getElementById("sub-direct").textContent = sec.dataset.direct;
   document.getElementById("sub-chain").textContent = sec.dataset.chain;
 }
-async function copySub(which) {
+async function copySub(which, btn) {
   const sec = document.getElementById("sec-sub");
   const text = which === "direct" ? sec.dataset.direct : sec.dataset.chain;
   if (!text) return;
@@ -579,7 +645,11 @@ async function copySub(which) {
     try { document.execCommand("copy"); } catch (_e) {}
     ta.remove();
   }
-  toast("链接已复制");
+  if (btn) {
+    const old = btn.textContent;
+    btn.textContent = "已复制 ✓";
+    setTimeout(() => { btn.textContent = old; }, 1500);
+  }
 }
 async function refreshLogs(btn) {
   if (btn) { btn.disabled = true; }
@@ -627,10 +697,10 @@ function renderVerify(v, pref) {
     return;
   }
   if (v.state === "running") {
-    el.textContent = "正在经 " + (v.via_tag || "…") + " 验证出口…";
+    el.textContent = "正在验证出口…";
     return;
   }
-  el.textContent = v.exit_ip ? ("当前出口 IP：" + v.exit_ip + "（经 " + v.via_tag + "，" + v.ms + "ms）")
+  el.textContent = v.exit_ip ? ("当前出口 IP：" + v.exit_ip + "（" + v.ms + "ms）")
     : ("验证失败" + (v.error ? "：" + v.error : ""));
 }
 function renderProbeProgress(fp) {
@@ -643,7 +713,29 @@ function renderProbeProgress(fp) {
   fill.setAttribute("aria-valuenow", String(pct));
   document.getElementById("probe-txt").textContent = "全量真测 " + fp.state + " " + fp.done + "/" + fp.total + "（" + pct + "%）";
 }
+var undoFrom = null, undoTimer = null;
+function ipOf(tag) {
+  const ep = (lastStatus && lastStatus.endpoints || []).find(x => x.tag === tag);
+  return (ep && ep.server) || tag;
+}
+function showUndo(fromTag, toTag) {
+  if (!fromTag || fromTag === toTag) return;
+  undoFrom = fromTag;
+  document.getElementById("undo-from").textContent = ipOf(fromTag);
+  document.getElementById("undo-to").textContent = ipOf(toTag);
+  document.getElementById("switch-undo").hidden = false;
+  if (undoTimer) clearTimeout(undoTimer);
+  undoTimer = setTimeout(() => { document.getElementById("switch-undo").hidden = true; undoFrom = null; }, 15000);
+}
+function onUndo() {
+  if (!undoFrom) return;
+  const back = undoFrom;
+  undoFrom = null;
+  document.getElementById("switch-undo").hidden = true;
+  switchTag(back);
+}
 async function switchTag(tag) {
+  const fromTag = lastStatus ? lastStatus.preferred_tag : null;
   const ep = (lastStatus && lastStatus.endpoints || []).find(x => x.tag === tag);
   if (ep && ep.real_latency_ms == null) { toast("先测速再切换：该节点还未测通", true); return; }
   pendingTag = tag;
@@ -652,7 +744,7 @@ async function switchTag(tag) {
   renderFiltered();
   try {
     const r = await api("/api/switch", "POST", {"tag": tag});
-    toast("已切换到 " + (r.preferred_tag || tag) + "，正在验证新出口…");
+    showUndo(fromTag, r.preferred_tag || tag);
     await verifyExit();
   } catch (e) {
     if (!isAbort(e)) toast("切换失败: " + e.message, true);
@@ -665,9 +757,10 @@ async function probeOne(tag) {
   if (pollCtl) pollCtl.abort();
   pollCtl = new AbortController();
   const sig = pollCtl.signal;
+  const btn = document.querySelector("[data-probe='" + tag + "']");
+  if (btn) { btn.disabled = true; btn.textContent = "测速中…"; }
   try {
     await api("/api/probe", "POST", {"tag": tag}, sig);
-    toast("单测 " + tag + " 进行中…");
     for (let i = 0; i < 40; i++) {
       if (my !== probeSeq) break;
       await new Promise(r => setTimeout(r, 3000));
@@ -675,7 +768,7 @@ async function probeOne(tag) {
       const s = await api("/api/status", "GET", null, sig);
       lastStatus = s;
       if (s.probe && s.probe.state === "done" && s.probe.tag === tag) {
-        toast(s.probe.ms != null ? ("单测 " + tag + " 完成：" + s.probe.ms + "ms") : ("单测 " + tag + " 未打通"));
+        if (s.probe.ms == null) toast("单测 " + tag + " 未打通", true);
         break;
       }
       if (i === 39) toast("单测超时，请重试", true);
@@ -691,12 +784,19 @@ async function refreshNow() {
   const btn = document.getElementById("btn-refresh");
   if (btn && btn.disabled) return;
   setBusy("btn-refresh", true, "刷新中…");
-  if (lastStatus) skeletonRows();
+  const benchTable = document.querySelector("table.bench");
+  const thin = document.getElementById("thinbar");
+  if (lastStatus) {
+    if (benchTable) benchTable.classList.add("loading");
+    if (thin) thin.classList.add("show");
+  } else skeletonRows();
   try {
     const r = await api("/api/refresh", "POST", {});
-    toast(r.ok ? "节点已刷新" : "刷新完成但有失败");
+    if (!r.ok) toast("刷新完成但有失败", true);
     refreshLogs(null);
   } catch (e) { if (!isAbort(e)) toast("刷新失败: " + e.message, true); }
+  if (benchTable) benchTable.classList.remove("loading");
+  if (thin) thin.classList.remove("show");
   setBusy("btn-refresh", false);
   refresh();
 }
@@ -739,7 +839,8 @@ async function verifyExit() {
   pollCtl = new AbortController();
   const sig = pollCtl.signal;
   setBusy("btn-verify", true, "验证中…");
-  document.getElementById("verify-result").textContent = "正在建立 VPN 链路并抓取出口 IP…";
+  document.getElementById("verify-result").textContent = "正在验证新出口…";
+  const verifyT0 = Date.now();
   try {
     await api("/api/verify", "POST", {}, sig);
     for (let i = 0; i < 40; i++) {
@@ -750,8 +851,12 @@ async function verifyExit() {
       lastStatus = s;
       renderVerify(s.verify);
       if (s.verify && s.verify.state === "done") {
-        toast(s.verify.exit_ip ? ("出口 IP：" + s.verify.exit_ip) : "验证未拿到出口 IP", !s.verify.exit_ip);
+        if (!s.verify.exit_ip) toast("验证未拿到出口 IP", true);
         break;
+      }
+      if (s.verify && s.verify.state !== "done") {
+        const vr = document.getElementById("verify-result");
+        vr.textContent += "（已等待 " + Math.round((Date.now() - verifyT0) / 1000) + "s）";
       }
       if (i === 39) toast("验证超时，请重试", true);
     }
@@ -774,6 +879,7 @@ async function verifyExit() {
 silentLogin();
 syncThemeLabel();
 document.getElementById("sortsel").addEventListener("change", (ev) => { sortKey = ev.target.value; sortDir = 1; renderFiltered(); });
+document.getElementById("scope").addEventListener("change", (ev) => { activeCountry = ev.target.value; renderFiltered(); });
 document.querySelectorAll("th.sortable").forEach((th) => {
   th.onclick = () => {
     const k = th.getAttribute("data-k");
@@ -792,7 +898,7 @@ window.addEventListener("scroll", () => {
   document.querySelectorAll("#topnav .links a").forEach((a) => a.classList.toggle("on", a.getAttribute("href") === "#" + cur));
 }, {passive: true});
 document.getElementById("bench-body").onclick = (ev) => {
-  const link = ev.target && ev.target.closest ? ev.target.closest("a") : null;
+  const link = ev.target && ev.target.closest ? ev.target.closest("[data-probe],[data-switch]") : null;
   if (!link) return;
   if (link.getAttribute("aria-disabled") === "true") {
     if (link.getAttribute("data-switch")) toast("先测速再切换：该节点还未测通", true);
@@ -805,7 +911,7 @@ document.getElementById("bench-body").onclick = (ev) => {
 };
 document.getElementById("bench-body").onkeydown = (ev) => {
   if (ev.key !== "Enter" && ev.key !== " ") return;
-  const link = ev.target && ev.target.closest ? ev.target.closest("a") : null;
+  const link = ev.target && ev.target.closest ? ev.target.closest("[data-probe],[data-switch]") : null;
   if (!link || link.getAttribute("aria-disabled") === "true") return;
   ev.preventDefault();
   const p = link.getAttribute("data-probe");
@@ -965,6 +1071,64 @@ def _rss_mb() -> float | None:
         return None
 
 
+def _cpu_times(stat_path: str = "/proc/stat") -> tuple[int, int] | None:
+    """Host CPU (idle_all, total) jiffies from /proc/stat (Linux only)."""
+    try:
+        with open(stat_path, encoding="utf-8") as handle:
+            first = handle.readline().split()
+    except OSError:
+        return None
+    if len(first) < 9 or first[0] != "cpu":
+        return None
+    try:
+        nums = [int(v) for v in first[1:9]]
+    except ValueError:
+        return None
+    return nums[3] + nums[4], sum(nums)
+
+
+def _cpu_pct(old: tuple[int, int], new: tuple[int, int]) -> float | None:
+    """Busy % between two _cpu_times samples (None on zero/negative delta)."""
+    total_delta = new[1] - old[1]
+    if total_delta <= 0:
+        return None
+    return round((1.0 - (new[0] - old[0]) / total_delta) * 100.0, 1)
+
+
+def _cpu_model(cpuinfo_path: str = "/proc/cpuinfo") -> str | None:
+    """First 'model name' from /proc/cpuinfo (None where unavailable)."""
+    try:
+        with open(cpuinfo_path, encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("model name"):
+                    _, _, name = line.partition(":")
+                    name = name.strip()
+                    if name:
+                        return name
+    except OSError:
+        return None
+    return None
+
+
+def _mem_pct(meminfo_path: str = "/proc/meminfo") -> float | None:
+    """Host memory usage % from /proc/meminfo (None where unavailable)."""
+    total = available = None
+    try:
+        with open(meminfo_path, encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    total = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    available = int(line.split()[1])
+                if total is not None and available is not None:
+                    break
+    except (OSError, ValueError, IndexError):
+        return None
+    if not total:
+        return None
+    return round((total - available) / total * 100.0, 1)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -1118,6 +1282,9 @@ class RailwayManager:
         self.preferred_tag: str | None = None
         self._nodes: list[dict] = []
         self._first_seen: dict[str, str] = {}
+        self._cpu_model = _cpu_model()
+        self._cpu_cores = os.cpu_count()
+        self._cpu_last: tuple[int, int] | None = None
         self._fail_streak = 0
         self._pinned_fail_streak = 0
         self._crash_streak = 0
@@ -1526,7 +1693,17 @@ class RailwayManager:
         with self._lock:
             snapshot = json.loads(json.dumps(self.status))
         snapshot["threads"] = threading.active_count()
-        snapshot["memory"] = {"rss_mb": _rss_mb()}
+        with self._lock:
+            cpu_now = _cpu_times()
+            if self._cpu_last is not None and cpu_now is not None:
+                cpu_pct = _cpu_pct(self._cpu_last, cpu_now)
+            else:
+                cpu_pct = None
+            if cpu_now is not None:
+                self._cpu_last = cpu_now
+        snapshot["cpu"] = {"model": self._cpu_model, "cores": self._cpu_cores,
+                           "pct": cpu_pct}
+        snapshot["memory"] = {"rss_mb": _rss_mb(), "pct": _mem_pct()}
         now = datetime.now(timezone.utc)
         try:
             started = datetime.strptime(self.status["started_at"] or "", "%Y-%m-%dT%H:%M:%SZ")
