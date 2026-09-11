@@ -61,6 +61,35 @@ class TrialRunJobTests(unittest.TestCase):
         self.assertIn("ws-chain", self.text)
 
 
+class FixVerificationTests(unittest.TestCase):
+    """CI must behaviorally verify the fixes, not just avoid regressions."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.text = WORKFLOW.read_text(encoding="utf-8")
+
+    def test_port_refusal_boot_check(self) -> None:
+        self.assertIn("PORT refusal", self.text)
+        self.assertIn("collides", self.text)
+
+    def test_mirror_fallback_boot_check(self) -> None:
+        self.assertIn("SNAPSHOT_URLS", self.text)
+        self.assertIn("refresh_ok", self.text)
+
+    def test_single_flight_409_checks(self) -> None:
+        self.assertIn("single-flight 409", self.text)
+        self.assertIn('"409"', self.text)
+
+    def test_tag_uniqueness_and_metrics_checks(self) -> None:
+        self.assertIn("tag uniqueness", self.text)
+        self.assertIn("rss_mb", self.text)
+        self.assertIn("chain-socks", self.text)
+
+    def test_drain_shutdown_check(self) -> None:
+        self.assertIn("mux drain", self.text)
+        self.assertIn("docker stop", self.text)
+
+
 PUBLISH_WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "publish-image.yml"
 
 
