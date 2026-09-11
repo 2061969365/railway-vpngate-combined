@@ -763,9 +763,9 @@ def build_singbox_config(
 
     When vless_uuid is set, two VLESS+WS inbounds are added for Cloudflare
     Tunnel use: "vless-direct" (Railway-local exit via "direct") and
-    "vless-chain" (VPNGate exit via the "chain-socks" socks5 outbound that
-    points at the mixed inbound). Route rules split by inbound tag, so the
-    two paths never mix. Requires the mixed inbound (the chain target).
+    "vless-chain" (VPNGate exit via "auto", or via the "chain" selector
+    when preferred). Route rules split by inbound tag, so the
+    two paths never mix. Requires the mixed inbound (the $PORT mux target).
 
     When preferred names one of the endpoint tags, a "chain" selector
     ([preferred, "auto"]) becomes route.final instead of the bare tag, so a
@@ -801,7 +801,7 @@ def build_singbox_config(
         config["inbounds"] = [inbound]
     if vless_uuid is not None:
         if mixed_listen is None or mixed_port is None:
-            raise ValueError("vless inbounds need the mixed inbound as chain target")
+            raise ValueError("vless inbounds need the mixed inbound ($PORT mux target)")
         config.setdefault("inbounds", []).extend([
             {"type": "vless", "tag": "vless-direct",
              "listen": "0.0.0.0", "listen_port": vless_direct_port,
@@ -812,15 +812,14 @@ def build_singbox_config(
              "users": [{"uuid": vless_uuid}],
              "transport": {"type": "ws", "path": vless_chain_path}},
         ])
-        chain_socks: dict = {"type": "socks", "tag": "chain-socks",
-                             "server": "127.0.0.1", "server_port": mixed_port,
-                             "version": "5"}
-        if mixed_users:
-            chain_socks["username"], chain_socks["password"] = mixed_users[0]
-        config["outbounds"].append(chain_socks)
+        # No loopback hop: vless-chain routes straight into the urltest group
+        # (or the "chain" selector when pinned), which is exactly where the
+        # old chain-socks -> mixed -> route.final path ended up. One less
+        # hop, and a dead mixed inbound no longer kills both VLESS paths.
+        chain_target = "chain" if preferred else "auto"
         config["route"]["rules"] = [
             {"inbound": "vless-direct", "outbound": "direct"},
-            {"inbound": "vless-chain", "outbound": "chain-socks"},
+            {"inbound": "vless-chain", "outbound": chain_target},
         ]
     return config
 
