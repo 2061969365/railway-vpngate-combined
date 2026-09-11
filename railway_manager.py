@@ -26,6 +26,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -50,6 +51,7 @@ MIN_ADMIN_TOKEN_LEN = 16
 PIPE_IDLE_TIMEOUT = 120
 MAX_MUX_CONNECTIONS = 100
 MAX_POST_CONNECTIONS = 16
+DRAIN_TIMEOUT = 10.0
 STALE_RUNNING_AFTER = 180.0
 HEALTH_CHECK_INTERVAL = 20
 PINNED_FAIL_THRESHOLD = 3
@@ -854,9 +856,15 @@ def build_config_from_env(env: dict) -> dict:
               flush=True)
         raise SystemExit(2)
     snapshot_url = env.get("SNAPSHOT_URL", DEFAULT_SNAPSHOT_URL)
-    if urllib.parse.urlsplit(snapshot_url).scheme != "https":
-        print("refusing to start: SNAPSHOT_URL must be https", flush=True)
-        raise SystemExit(2)
+    raw_mirrors = env.get("SNAPSHOT_URLS", "")
+    snapshot_urls = [u.strip() for u in raw_mirrors.split(",") if u.strip()]
+    if not snapshot_urls:
+        snapshot_urls = [snapshot_url]
+    for url in snapshot_urls:
+        if urllib.parse.urlsplit(url).scheme != "https":
+            print(f"refusing to start: snapshot url must be https: {url}",
+                  flush=True)
+            raise SystemExit(2)
     if "ADMIN_TOKEN" not in env or not env["ADMIN_TOKEN"]:
         admin_token = "vpn"
         generated = False
@@ -875,6 +883,7 @@ def build_config_from_env(env: dict) -> dict:
         "admin_token": admin_token,
         "admin_token_generated": generated,
         "snapshot_url": snapshot_url,
+        "snapshot_urls": snapshot_urls,
         "refresh_seconds": int(env.get("REFRESH_SECONDS", "1200")),
         "limit": int(env.get("LIMIT", "0")),
         "real_topk": int(env.get("REAL_TOPK", "10")),
@@ -930,6 +939,20 @@ def assign_stable_tags(nodes: list[dict], old_nodes: list[dict],
         endpoint["tag"] = reused
         node["endpoint"] = endpoint
         used.add(reused)
+
+
+def _rss_mb() -> float | None:
+    """Own peak RSS in MB (Linux only; None where resource is missing)."""
+    try:
+        import resource
+    except ImportError:
+        return None
+    try:
+        # ru_maxrss is KiB on Linux, bytes on macOS.
+        scale = 1024.0 if os.name == "posix" and not sys.platform.startswith("darwin") else (1024.0 * 1024.0)
+        return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / scale, 1)
+    except OSError:
+        return None
 
 
 def _now_iso() -> str:
@@ -1019,6 +1042,7 @@ class RailwayManager:
         password: str = "p",
         admin_token: str | None = None,
         snapshot_url: str = DEFAULT_SNAPSHOT_URL,
+        snapshot_urls: list | None = None,
         refresh_seconds: int = 1200,
         limit: int | None = 0,
         real_topk: int = 0,
@@ -1051,6 +1075,7 @@ class RailwayManager:
         self.password = password
         self.admin_token = admin_token
         self.snapshot_url = snapshot_url
+        self.snapshot_urls = list(snapshot_urls) if snapshot_urls else [snapshot_url]
         self.refresh_seconds = refresh_seconds
         self.limit = limit
         self.real_topk = real_topk
@@ -1114,6 +1139,7 @@ class RailwayManager:
         self._verify_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._mux_slots = threading.BoundedSemaphore(max_mux_connections)
+        self._mux_inflight = 0
         self._post_slots = threading.BoundedSemaphore(MAX_POST_CONNECTIONS)
         self._health_check_interval = health_check_interval
         self._listener: socket.socket | None = None
@@ -1158,6 +1184,17 @@ class RailwayManager:
         elif not self.refresh_once(probe_pool=INITIAL_PROBE_POOL):
             self._boot_from_last_good()
 
+    def _drain(self, timeout: float = DRAIN_TIMEOUT) -> bool:
+        """Wait for in-flight mux pipes to finish, up to timeout seconds."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        while time.monotonic() < deadline:
+            with self._lock:
+                if self._mux_inflight <= 0:
+                    return True
+            time.sleep(0.05)
+        with self._lock:
+            return self._mux_inflight <= 0
+
     def stop(self) -> None:
         self._stop_event.set()
         if self._listener is not None:
@@ -1166,6 +1203,7 @@ class RailwayManager:
             except OSError:
                 pass
             self._listener = None
+        self._drain()
         self._terminate_singbox()
         self._terminate_cloudflared()
 
@@ -1208,8 +1246,11 @@ class RailwayManager:
                 try:
                     with self._lock:
                         self.status["traffic"]["connections"] += 1
+                        self._mux_inflight += 1
                     self._pipe_to_backend(client, peek)
                 finally:
+                    with self._lock:
+                        self._mux_inflight -= 1
                     self._mux_slots.release()
             elif kind == "http":
                 self._handle_http(client, peek)
@@ -1471,6 +1512,7 @@ class RailwayManager:
         with self._lock:
             snapshot = json.loads(json.dumps(self.status))
         snapshot["threads"] = threading.active_count()
+        snapshot["memory"] = {"rss_mb": _rss_mb()}
         now = datetime.now(timezone.utc)
         try:
             started = datetime.strptime(self.status["started_at"] or "", "%Y-%m-%dT%H:%M:%SZ")
@@ -1900,20 +1942,27 @@ class RailwayManager:
     def _sync_probe_results(self, nodes: list[dict]) -> None:
         by_key = {(ep.get("server"), ep.get("server_port")): ep
                   for ep in self.status["endpoints"]}
-        for i, node in enumerate(nodes):
+        used = {ep.get("tag") for ep in self.status["endpoints"]}
+        counter = 0
+        for node in nodes:
             key = (node.get("server"), node.get("server_port"))
             if key in by_key:
                 by_key[key]["real_latency_ms"] = node.get("real_latency_ms")
-            else:
-                entry = {"tag": f"vpngate-{i}", "server": node.get("server"),
-                         "server_port": node.get("server_port"),
-                         "country": node.get("country", ""),
-                         "country_short": node.get("country_short", ""),
-                         "latency_ms": node.get("latency_ms"),
-                         "real_latency_ms": node.get("real_latency_ms"),
-                         "speed": node.get("speed", 0)}
-                self.status["endpoints"].append(entry)
-                by_key[key] = entry
+                continue
+            while f"vpngate-{counter}" in used:
+                counter += 1
+            tag = f"vpngate-{counter}"
+            counter += 1
+            used.add(tag)
+            entry = {"tag": tag, "server": node.get("server"),
+                     "server_port": node.get("server_port"),
+                     "country": node.get("country", ""),
+                     "country_short": node.get("country_short", ""),
+                     "latency_ms": node.get("latency_ms"),
+                     "real_latency_ms": node.get("real_latency_ms"),
+                     "speed": node.get("speed", 0)}
+            self.status["endpoints"].append(entry)
+            by_key[key] = entry
 
     @staticmethod
     def _running_fresh(state: dict, thread) -> bool:
@@ -2031,10 +2080,11 @@ class RailwayManager:
         for wait in delays:
             if wait:
                 time.sleep(wait)
-            try:
-                return fetch(self.snapshot_url, 20)
-            except Exception as exc:
-                last_exc = exc
+            for url in self.snapshot_urls:
+                try:
+                    return fetch(url, 20)
+                except Exception as exc:
+                    last_exc = exc
         assert last_exc is not None
         raise last_exc
 
@@ -2046,6 +2096,17 @@ class RailwayManager:
         except (OSError, subprocess.TimeoutExpired):
             return False
 
+    @staticmethod
+    def _rotate_stderr_file(stderr_path: str, keep_bytes: int = 200 * 1024) -> None:
+        """Keep crash context: rotate a full stderr log to .prev instead of
+        deleting it, so /api/logs-adjacent debugging survives restarts."""
+        try:
+            if (os.path.exists(stderr_path)
+                    and os.path.getsize(stderr_path) > keep_bytes):
+                os.replace(stderr_path, f"{stderr_path}.prev")
+        except OSError:
+            pass
+
     def _restart_singbox(self) -> None:
         with self._lock:
             old_proc, self._singbox_proc = self._singbox_proc, None
@@ -2053,12 +2114,7 @@ class RailwayManager:
             stderr_path = f"{self.config_path}.stderr.log"
             config_path = self.config_path
             singbox_bin = self.singbox_bin
-            try:
-                if (os.path.exists(stderr_path)
-                        and os.path.getsize(stderr_path) > 200 * 1024):
-                    os.unlink(stderr_path)
-            except OSError:
-                pass
+            self._rotate_stderr_file(stderr_path)
             try:
                 new_handle = open(stderr_path, "ab")
             except OSError:
@@ -2161,6 +2217,7 @@ def main() -> int:
         password=cfg["password"],
         admin_token=cfg["admin_token"],
         snapshot_url=cfg["snapshot_url"],
+        snapshot_urls=cfg["snapshot_urls"],
         refresh_seconds=cfg["refresh_seconds"],
         limit=cfg["limit"],
         real_topk=cfg["real_topk"],
