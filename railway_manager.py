@@ -1213,7 +1213,11 @@ class RailwayManager:
             except OSError:
                 pass
             self._listener = None
-        self._drain()
+        drained = self._drain()
+        with self._lock:
+            remaining = self._mux_inflight
+        print(f"shutdown: mux drain {'done' if drained else 'timeout'} "
+              f"({remaining} in flight)", flush=True)
         self._terminate_singbox()
         self._terminate_cloudflared()
 
