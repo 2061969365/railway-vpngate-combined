@@ -1358,26 +1358,27 @@ class GlassUiTests(unittest.TestCase):
         self.assertIn("fullSeq", UI_HTML)
 
     def test_served_js_parses(self) -> None:
-        """Extract <script> from the RUNTIME UI_HTML (post-Python-unescape)
-        and run node --check: catches backslash-quote breakage that a
+        """Extract every <script> from the RUNTIME UI_HTML (post-Python-unescape)
+        and run node --check on each: catches backslash-quote breakage that a
         source-level check would miss."""
         node = shutil.which("node")
         if node is None:
             self.skipTest("node not installed")
-        match = re.search(r"<script>(.*)</script>", UI_HTML, re.S)
-        self.assertIsNotNone(match)
-        with tempfile.NamedTemporaryFile("w", suffix=".js",
-                                         delete=False,
-                                         encoding="utf-8") as handle:
-            handle.write(match.group(1))
-            path = handle.name
-        try:
-            result = subprocess.run([node, "--check", path],
-                                    capture_output=True, text=True,
-                                    timeout=60)
-        finally:
-            os.unlink(path)
-        self.assertEqual(0, result.returncode, result.stderr)
+        blocks = re.findall(r"<script>(.*?)</script>", UI_HTML, re.S)
+        self.assertTrue(blocks)
+        for block in blocks:
+            with tempfile.NamedTemporaryFile("w", suffix=".js",
+                                             delete=False,
+                                             encoding="utf-8") as handle:
+                handle.write(block)
+                path = handle.name
+            try:
+                result = subprocess.run([node, "--check", path],
+                                        capture_output=True, text=True,
+                                        timeout=60)
+            finally:
+                os.unlink(path)
+            self.assertEqual(0, result.returncode, result.stderr)
 
 
 class UiPolishTests(unittest.TestCase):
@@ -2013,6 +2014,127 @@ class MuxLimitTests(unittest.TestCase):
                 client.close()
         finally:
             manager.stop()
+
+
+class LogApiTests(unittest.TestCase):
+    """GET /api/logs streams the sing-box stderr tail (authed)."""
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def setUp(self) -> None:
+        self.manager = RailwayManager(
+            port=0, mixed_port=get_free_port(), admin_token=self.TOKEN,
+            start_singbox=False, auto_refresh=False, fetch_on_start=False,
+            config_path="noop-logs-singbox.json",
+        )
+        self.port = self.manager.start()
+
+    def tearDown(self) -> None:
+        self.manager.stop()
+
+    def _request(self, path: str, token: str | None = None) -> bytes:
+        sock = socket.create_connection(("127.0.0.1", self.port), timeout=5)
+        with sock:
+            headers = f"GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n"
+            if token is not None:
+                headers += f"Authorization: Bearer {token}\r\n"
+            sock.sendall(headers.encode() + b"\r\n")
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        return response
+
+    def _body(self, response: bytes) -> dict:
+        _, _, body = response.partition(b"\r\n\r\n")
+        return json.loads(body.decode("utf-8"))
+
+    def test_logs_without_token_is_401(self) -> None:
+        self.assertIn(b"401", self._request("/api/logs"))
+
+    def test_logs_missing_file_returns_empty_list(self) -> None:
+        response = self._request("/api/logs", token=self.TOKEN)
+        self.assertIn(b"200 OK", response)
+        payload = self._body(response)
+        self.assertEqual([], payload["lines"])
+
+    def test_logs_limit_is_clamped(self) -> None:
+        payload = self._body(self._request("/api/logs?lines=5000", token=self.TOKEN))
+        self.assertEqual(200, payload["limit"])
+        payload = self._body(self._request("/api/logs?lines=0", token=self.TOKEN))
+        self.assertEqual(1, payload["limit"])
+
+
+class VlessStatusTests(unittest.TestCase):
+    """status carries subscription material when VLESS is enabled."""
+
+    def test_status_has_vless_when_uuid_set(self) -> None:
+        manager = RailwayManager(
+            port=0, mixed_port=get_free_port(),
+            start_singbox=False, auto_refresh=False, fetch_on_start=False,
+            vless_uuid="u-u-i-d", vless_direct_port=8080, vless_chain_port=8082)
+        try:
+            vless = manager.status_snapshot()["vless"]
+        finally:
+            manager.stop()
+        self.assertEqual({"uuid": "u-u-i-d", "direct_path": "/ws-node",
+                          "chain_path": "/ws-chain"}, vless)
+
+    def test_status_vless_is_none_without_uuid(self) -> None:
+        manager = RailwayManager(
+            port=0, mixed_port=get_free_port(),
+            start_singbox=False, auto_refresh=False, fetch_on_start=False)
+        try:
+            vless = manager.status_snapshot()["vless"]
+        finally:
+            manager.stop()
+        self.assertIsNone(vless)
+
+
+class ConsoleV2Tests(unittest.TestCase):
+    """v2 console: old skin, new IA, light theme, read-only additions."""
+
+    def test_statusbar_and_theme_toggle_present(self) -> None:
+        self.assertIn('id="statusbar"', UI_HTML)
+        self.assertIn('id="sb-exit"', UI_HTML)
+        self.assertIn('id="btn-theme"', UI_HTML)
+        self.assertIn("toggleTheme(", UI_HTML)
+        self.assertIn('data-theme="light"', UI_HTML)
+        self.assertIn("prefers-color-scheme", UI_HTML)
+
+    def test_sections_have_stable_anchors(self) -> None:
+        for section in ("sec-overview", "sec-nodes", "sec-logs",
+                        "sec-sub", "sec-hist"):
+            self.assertIn('id="%s"' % section, UI_HTML)
+
+    def test_nodes_sorting_and_latency_helpers_present(self) -> None:
+        self.assertIn('id="sortsel"', UI_HTML)
+        self.assertIn('data-k="real"', UI_HTML)
+        self.assertIn("function latBar(", UI_HTML)
+        self.assertIn("function sortVal(", UI_HTML)
+        self.assertIn('id="node-count"', UI_HTML)
+
+    def test_rate_and_routes_rendered(self) -> None:
+        self.assertIn('id="spark"', UI_HTML)
+        self.assertIn('id="rate-card"', UI_HTML)
+        self.assertIn('id="route-strip"', UI_HTML)
+        self.assertIn('id="stat-down"', UI_HTML)
+
+    def test_logs_and_subscription_wired(self) -> None:
+        self.assertIn('id="logbox"', UI_HTML)
+        self.assertIn("function refreshLogs(", UI_HTML)
+        self.assertIn("/api/logs", UI_HTML)
+        self.assertIn('id="sub-direct"', UI_HTML)
+        self.assertIn("function copySub(", UI_HTML)
+
+    def test_switch_closure_and_skeleton_present(self) -> None:
+        self.assertIn("pendingTag", UI_HTML)
+        self.assertIn("function skeletonRows(", UI_HTML)
+        self.assertIn("正在验证新出口", UI_HTML)
+
+    def test_reduced_motion_respected(self) -> None:
+        self.assertIn("prefers-reduced-motion", UI_HTML)
 
 
 if __name__ == "__main__":
