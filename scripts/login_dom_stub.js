@@ -5,16 +5,22 @@
   function mkEl(id) {
     return {
       id, textContent: "", value: "", disabled: false, dataset: {},
+      children: [], innerHTML: "",
       style: { display: "" },
       classList: { _s: new Set(), add(c) { this._s.add(c); }, remove(c) { this._s.delete(c); }, contains(c) { return this._s.has(c); } },
       onclick: null,
+      addEventListener() {}, select() {}, focus() {},
+      appendChild() {}, remove() {},
+      querySelector: () => null,
     };
   }
   ["login-gate", "login-token", "btn-login", "login-err", "console",
-   "hero-kicker", "hero-sub", "verify-result", "stat-nodes", "stat-best",
-   "stat-uptime", "stat-refresh", "pills", "bench-body", "probe-progress",
-   "probe-fill", "probe-txt", "history-line", "history-list", "foot-status",
-   "toast", "node-search", "btn-verify", "btn-refresh", "btn-fullprobe",
+   "hero-kicker", "hero-sub", "verify-result", "switch-undo", "stat-nodes", "stat-best",
+   "stat-uptime", "stat-refresh", "stat-down", "stat-up", "scope", "sortsel",
+   "bench-body", "probe-progress", "thinbar",
+   "probe-fill", "probe-txt", "history-line", "history-list", "foot-cpu", "foot-mem",
+   "toast", "node-search", "loglevel", "logbox", "btn-verify", "btn-refresh", "btn-fullprobe",
+   "sb-exit", "sb-node", "rate-dn", "rate-up", "rate-card", "node-count",
   ].forEach((id) => { els[id] = mkEl(id); });
   // console starts hidden, gate visible (mirrors served HTML)
   els["console"].style.display = "none";
@@ -42,8 +48,12 @@
         }),
       };
     }
+    if (path === "/api/logs") {
+      return { status: 200, ok: true, text: async () => "{}", json: async () => ({ lines: [] }) };
+    }
     throw new Error("unexpected fetch " + path);
   };
+  global.window = { addEventListener() {} };
   global.document = {
     getElementById: (id) => els[id] || null,
     querySelector: (sel) => (sel === ".login-card" ? mkEl("card") : null),
