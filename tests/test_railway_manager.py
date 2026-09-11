@@ -14,7 +14,8 @@ import time
 import unittest
 from unittest import mock
 
-from railway_manager import (UI_HTML, RailwayManager, build_config_from_env,
+from railway_manager import (UI_HTML, RailwayManager, _cpu_model, _cpu_pct,
+                               _cpu_times, _mem_pct, build_config_from_env,
                                classify_first_bytes, default_fetch)
 from vpngate_to_singbox import (build_singbox_config, nodes_to_endpoints,
                                 ovpn_to_endpoint, snapshot_to_nodes)
@@ -658,8 +659,11 @@ class AstraUiTests(unittest.TestCase):
         self.assertIn('id="btn-verify"', UI_HTML)
         self.assertIn('id="btn-refresh"', UI_HTML)
 
-    def test_pills_and_bench_table_present(self) -> None:
-        self.assertIn('id="pills"', UI_HTML)
+    def test_scope_select_and_bench_table_present(self) -> None:
+        # pills retired in favour of the single search+scope entry (Apple HIG:
+        # one searchable location + scope control).
+        self.assertNotIn('id="pills"', UI_HTML)
+        self.assertIn('id="scope"', UI_HTML)
         self.assertIn('id="bench-body"', UI_HTML)
         self.assertIn('id="history-line"', UI_HTML)
 
@@ -2567,6 +2571,128 @@ class StderrRotationTests(unittest.TestCase):
             RailwayManager._rotate_stderr_file(path)
             self.assertTrue(os.path.exists(path))
             self.assertFalse(os.path.exists(path + ".prev"))
+
+
+class CpuMetricTests(unittest.TestCase):
+    """status_snapshot carries host CPU + MEM (None where /proc unavailable)."""
+
+    def _write(self, tmpdir: str, name: str, text: str) -> str:
+        path = os.path.join(tmpdir, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def test_cpu_times_parses_proc_stat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write(tmpdir, "stat",
+                               "cpu  100 0 50 700 50 0 0 0 0 0\ncpu0 100 0 50 700 50 0 0 0 0 0\n")
+            self.assertEqual((750, 900), _cpu_times(path))
+
+    def test_cpu_times_missing_file_returns_none(self) -> None:
+        self.assertIsNone(_cpu_times("/nonexistent-proc-stat"))
+
+    def test_cpu_times_ignores_malformed_first_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write(tmpdir, "stat", "garbage line\n")
+            self.assertIsNone(_cpu_times(path))
+
+    def test_cpu_pct_between_samples(self) -> None:
+        # idle 750->810 (+60), total 900->1000 (+100): 40% busy.
+        self.assertAlmostEqual(40.0, _cpu_pct((750, 900), (810, 1000)))
+
+    def test_cpu_pct_zero_delta_is_none(self) -> None:
+        self.assertIsNone(_cpu_pct((750, 900), (750, 900)))
+
+    def test_cpu_model_parses_cpuinfo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write(tmpdir, "cpuinfo",
+                               "processor\t: 0\nmodel name\t: AMD EPYC 7B12\n\n")
+            self.assertEqual("AMD EPYC 7B12", _cpu_model(path))
+
+    def test_cpu_model_missing_file_returns_none(self) -> None:
+        self.assertIsNone(_cpu_model("/nonexistent-proc-cpuinfo"))
+
+    def test_mem_pct_parses_meminfo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._write(tmpdir, "meminfo",
+                               "MemTotal:        4024548 kB\nMemAvailable:    2415728 kB\n")
+            pct = _mem_pct(path)
+            self.assertAlmostEqual(40.0, pct, places=1)
+
+    def test_mem_pct_missing_file_returns_none(self) -> None:
+        self.assertIsNone(_mem_pct("/nonexistent-proc-meminfo"))
+
+    def test_snapshot_has_cpu_and_mem_keys(self) -> None:
+        manager = RailwayManager(
+            port=0, mixed_port=get_free_port(),
+            start_singbox=False, auto_refresh=False, fetch_on_start=False,
+            config_path="noop-cpu-singbox.json",
+            nodes_path="noop-cpu-nodes.json",
+            state_path="noop-cpu-state.json")
+        try:
+            snapshot = manager.status_snapshot()
+        finally:
+            manager.stop()
+
+        self.assertIn("model", snapshot["cpu"])
+        self.assertIn("cores", snapshot["cpu"])
+        self.assertIn("pct", snapshot["cpu"])
+        self.assertTrue(snapshot["cpu"]["pct"] is None
+                        or isinstance(snapshot["cpu"]["pct"], (int, float)))
+        self.assertIn("pct", snapshot["memory"])
+        self.assertTrue(snapshot["memory"]["pct"] is None
+                        or isinstance(snapshot["memory"]["pct"], (int, float)))
+
+
+class AppleInteractionTests(unittest.TestCase):
+    """Apple-HIG interaction port: live region, real buttons, undo instead of
+    confirm, silent success, IP identity, Google-white light theme, footer CPU."""
+
+    def test_toast_is_live_region(self) -> None:
+        self.assertIn('id="toast" role="status" aria-live="polite"', UI_HTML)
+
+    def test_row_actions_are_real_buttons(self) -> None:
+        self.assertIn("opbtn", UI_HTML)
+        self.assertIn("min-height:28px", UI_HTML)
+        # data-attribute delegation contract (single quotes) is preserved.
+        self.assertIn("data-probe='", UI_HTML)
+        self.assertIn("data-switch='", UI_HTML)
+
+    def test_switch_undo_replaces_confirm(self) -> None:
+        self.assertIn('id="switch-undo"', UI_HTML)
+        self.assertIn("onUndo(", UI_HTML)
+        self.assertIn("撤销换回", UI_HTML)
+
+    def test_success_is_silent_failures_interrupt(self) -> None:
+        self.assertNotIn("已切换到 ", UI_HTML)
+        self.assertNotIn("节点已刷新", UI_HTML)
+        self.assertNotIn("链接已复制", UI_HTML)
+        self.assertIn("已复制", UI_HTML)
+        # Failure branches still interrupt.
+        self.assertIn("已有单测进行中，稍后再试", UI_HTML)
+        self.assertIn("已有验证进行中，稍后再试", UI_HTML)
+
+    def test_endpoint_column_shows_server_ip(self) -> None:
+        self.assertIn("出口 IP", UI_HTML)
+        self.assertIn("class='ip'", UI_HTML)
+
+    def test_google_white_light_theme(self) -> None:
+        self.assertIn("#1a73e8", UI_HTML)
+        self.assertIn('data-theme="light"', UI_HTML)
+        self.assertIn("toggleTheme(", UI_HTML)
+
+    def test_footer_shows_host_cpu_and_mem(self) -> None:
+        self.assertIn('id="foot-cpu"', UI_HTML)
+        self.assertIn('id="foot-mem"', UI_HTML)
+
+    def test_background_refresh_keeps_old_data(self) -> None:
+        self.assertIn('id="thinbar"', UI_HTML)
+
+    def test_verify_shows_elapsed_wait(self) -> None:
+        self.assertIn("已等待", UI_HTML)
+
+    def test_login_error_reselects_input(self) -> None:
+        self.assertIn("input.select()", UI_HTML)
 
 
 if __name__ == "__main__":
