@@ -52,7 +52,7 @@ jobs:
           EOF
       - name: Restore sing-box tarball from cache
         id: cache-singbox
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/sing-box-tarball.tgz
           key: sing-box-tarball-${{ env.SINGBOX_VERSION }}
@@ -127,7 +127,7 @@ jobs:
           print("live endpoints:", [(e["server"], e["server_port"]) for e in cfg["endpoints"]])
           EOF
       - name: Restore sing-box tarball from cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/sing-box-tarball.tgz
           key: sing-box-tarball-${{ env.SINGBOX_VERSION }}
@@ -163,7 +163,7 @@ jobs:
             --limit 3 --output /tmp/singbox-dial.json --tag vpngate \
             --mixed 127.0.0.1:18080
       - name: Restore sing-box tarball from cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/sing-box-tarball.tgz
           key: sing-box-tarball-${{ env.SINGBOX_VERSION }}
@@ -258,7 +258,7 @@ jobs:
             --limit 3 --output /tmp/singbox-stab.json --tag vpngate \
             --mixed 127.0.0.1:18080
       - name: Restore sing-box tarball from cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/sing-box-tarball.tgz
           key: sing-box-tarball-${{ env.SINGBOX_VERSION }}
@@ -412,7 +412,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Restore sing-box tarball from cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: /tmp/sing-box-tarball.tgz
           key: sing-box-tarball-${{ env.SINGBOX_VERSION }}
