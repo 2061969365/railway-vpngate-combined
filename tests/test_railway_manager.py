@@ -738,10 +738,10 @@ class EnvValidationTests(unittest.TestCase):
 
         self.assertEqual(0, config["limit"])
 
-    def test_real_topk_defaults_to_thirty(self) -> None:
+    def test_real_topk_defaults_to_ten(self) -> None:
         config = build_config_from_env(self._env())
 
-        self.assertEqual(30, config["real_topk"])
+        self.assertEqual(10, config["real_topk"])
 
     def test_missing_admin_token_defaults_to_vpn(self) -> None:
         env = {"PORT": "8080", "PROXY_USER": "u", "PROXY_PASS": "0123456789abcdef"}
@@ -769,10 +769,10 @@ class EnvValidationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             default_fetch("http://example.com/x.csv", timeout=1)
 
-    def test_dial_workers_defaults_to_ten(self) -> None:
+    def test_dial_workers_defaults_to_five(self) -> None:
         config = build_config_from_env(self._env())
 
-        self.assertEqual(10, config["dial_workers"])
+        self.assertEqual(5, config["dial_workers"])
 
     def test_dial_workers_env_override(self) -> None:
         config = build_config_from_env(self._env(DIAL_WORKERS="4"))
@@ -1908,19 +1908,20 @@ class StableTagTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self._manager(tmpdir, first)
             try:
+                # Everything that touches sing-box (check + spawn) stays
+                # inside _fake_singbox: outside it _check_config would run
+                # the real binary (absent on CI) and switch would fail.
                 with _fake_singbox(), \
                      mock.patch("railway_manager.probe_tcp_latency",
                                 return_value=100):
                     self.assertTrue(manager.refresh_once())
-                tags_first = {n["server"]: n["endpoint"]["tag"]
-                              for n in manager._nodes}
-                pinned = tags_first["203.0.113.11"]
-                manager.switch(tag=pinned)
+                    tags_first = {n["server"]: n["endpoint"]["tag"]
+                                  for n in manager._nodes}
+                    pinned = tags_first["203.0.113.11"]
+                    ok, _ = manager.switch(tag=pinned)
+                    self.assertTrue(ok)
 
-                manager.fetcher = lambda url, timeout: second
-                with _fake_singbox(), \
-                     mock.patch("railway_manager.probe_tcp_latency",
-                                return_value=100):
+                    manager.fetcher = lambda url, timeout: second
                     self.assertTrue(manager.refresh_once())
                 tags_second = {n["server"]: n["endpoint"]["tag"]
                                for n in manager._nodes}
