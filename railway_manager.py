@@ -875,9 +875,19 @@ def build_config_from_env(env: dict) -> dict:
         if len(admin_token) < MIN_ADMIN_TOKEN_LEN:
             admin_token = secrets.token_urlsafe(24)
             generated = True
+    mixed_port = int(env.get("MIXED_PORT", "40000"))
+    port = int(env.get("PORT", "3000"))
+    reserved = {8080, 8081, 8082, 4096, mixed_port}
+    if port in reserved:
+        print(f"refusing to start: PORT={port} collides with a fixed port "
+              f"(reserved: {sorted(reserved)}); set PORT=3000", flush=True)
+        raise SystemExit(2)
+    if port != 3000:
+        print(f"warning: PORT={port} is not 3000; tunnel ingress, TCP proxy "
+              f"and docs all assume 3000", flush=True)
     return {
-        "port": int(env.get("PORT", "8080")),
-        "mixed_port": int(env.get("MIXED_PORT", "40000")),
+        "port": port,
+        "mixed_port": mixed_port,
         "username": env.get("PROXY_USER", "u"),
         "password": password,
         "admin_token": admin_token,
@@ -889,7 +899,7 @@ def build_config_from_env(env: dict) -> dict:
         "real_topk": int(env.get("REAL_TOPK", "10")),
         "dial_workers": int(env.get("DIAL_WORKERS", "5")),
         "health_check_interval": int(env.get("HEALTH_CHECK_INTERVAL", "20")),
-        "max_mux_connections": int(env.get("MAX_MUX_CONNECTIONS", "200")),
+        "max_mux_connections": int(env.get("MAX_MUX_CONNECTIONS", "100")),
         "data_dir": env.get("DATA_DIR")
         or env.get("RAILWAY_VOLUME_MOUNT_PATH") or ".",
         "vless_uuid": env.get("VLESS_UUID", ""),
