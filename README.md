@@ -29,8 +29,8 @@ VPNGate 免费节点（sing-box `openvpn-client`，免 TUN/免特权）+ 双 VLE
      代理本身照常工作，`status["tunnel"] == "no-token"`）
      - 可选：`VLESS_UUID`（默认与 combined 一致；`VLESS_UUID` 为空则不注册 VLESS 入站，
        直接 `python railway_manager.py` 会无 VLESS）、`NEZHA_SERVER`/`NEZHA_KEY`、
-       `LIMIT`（默认 0=全量）、`REAL_TOPK`（默认 30）、`DIAL_WORKERS`（默认 10，
-       真测并发；1GB 内存够用，OOM 就往小调）
+       `LIMIT`（默认 0=全量）、`REAL_TOPK`（默认 10）、`DIAL_WORKERS`（默认 5，
+       真测并发；1GB 内存够用，OOM 就往小调）、`HEALTH_CHECK_INTERVAL`（默认 20s）、`MAX_MUX_CONNECTIONS`（默认 200）、`NEZHA_URL`（可选）
 3. 健康检查：`/` 路径填 `/healthz`（部署时需 200，冷启动靠 last-good 秒回）。
 4. 另加一个 TCP Proxy 指向内部 `3000` 端口（可选，给 SOCKS5 用）。
 5. 持久化（强烈建议）：service → Volumes → Add Volume，加完即可，
