@@ -82,10 +82,10 @@ docker run -d --name combined -p 3000:3000 -p 8080:8080 -p 8082:8082 \
 curl http://127.0.0.1:3000/healthz   # ok
 ```
 
-管理页：`http://127.0.0.1:3000/ui`（粘贴 ADMIN_TOKEN）。
+管理页：`http://127.0.0.1:3000/ui`（粘贴 ADMIN_TOKEN）。节点列表显示出口 IP（`tag` 只留在 API 参数里）；搜索框＋范围下拉＋排序同一行；右上可切 Google 白浅色主题；底部显示真机 CPU 型号与实时占用（`GET /api/status` 的 `cpu{model,cores,pct}`、`memory.pct`，Linux 下读 `/proc`，取不到为 `None`）。
 全量真测：管理页按钮或 `POST /api/full_probe`（需 `Authorization: Bearer`）。
-单节点测速：节点列表每行“测速”链接，或 `POST /api/probe {"tag":"vpngate-N"}`；
-测通的节点自动可切换（全部存活节点本就在 sing-box 配置里，无需重建）。
+单节点测速：节点列表每行“测速”按钮，或 `POST /api/probe {"tag":"vpngate-N"}`；
+测通的节点自动可切换（全部存活节点本就在 sing-box 配置里，无需重建）。切换即切即换，成功后总览出现 15 秒「撤销换回」；成功的操作只在行内确认，失败才右下角弹窗。
 
 ## CI
 
