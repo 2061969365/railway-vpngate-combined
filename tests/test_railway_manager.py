@@ -2695,5 +2695,107 @@ class AppleInteractionTests(unittest.TestCase):
         self.assertIn("input.select()", UI_HTML)
 
 
+class AuditFixAConsoleTests(unittest.TestCase):
+    """A批:纯修bug,零视觉变化.每条先红后绿."""
+
+    def test_mem_reads_memory_with_mem_fallback(self) -> None:
+        self.assertIn("s.mem || s.memory", UI_HTML)
+
+    def test_verify_abort_restores_button(self) -> None:
+        start = UI_HTML.index("async function verifyExit")
+        block = UI_HTML[start:start + 2200]
+        self.assertRegex(block,
+                         r'if \(isAbort\(e\)\) \{[^}]*setBusy\("btn-verify", false\)')
+
+    def test_hero_uses_unfiltered_endpoints(self) -> None:
+        self.assertNotIn("|| eps[0]", UI_HTML)
+        self.assertIn("|| s.endpoints[0]", UI_HTML)
+
+    def test_hero_labels_latency_source(self) -> None:
+        self.assertIn("未真测", UI_HTML)
+
+    def test_401_returns_to_login(self) -> None:
+        self.assertIn("登录已失效", UI_HTML)
+
+    def test_copy_reports_real_result(self) -> None:
+        self.assertIn("复制失败", UI_HTML)
+
+    def test_double_switch_blocked_while_pending(self) -> None:
+        self.assertIn("正在切换中，请稍候", UI_HTML)
+
+    def test_lock_clears_timers(self) -> None:
+        self.assertIn("clearTimeout(undoTimer)", UI_HTML)
+
+    def test_login_enter_guards_reentrancy(self) -> None:
+        self.assertIn("if (btn.disabled) return;", UI_HTML)
+
+    def test_log_truncates_before_escaping(self) -> None:
+        self.assertIn("esc(l.slice(0, 300))", UI_HTML)
+
+    def test_probe_abort_refreshes(self) -> None:
+        start = UI_HTML.index("async function probeOne")
+        block = UI_HTML[start:start + 1800]
+        self.assertGreaterEqual(block.count("refresh()"), 3)
+
+
+class AuditFixBConsoleTests(unittest.TestCase):
+    """B批:无障碍+可见体验.每条先红后绿."""
+
+    def test_headers_keyboard_sortable(self) -> None:
+        self.assertIn("aria-sort", UI_HTML)
+
+    def test_undo_is_button(self) -> None:
+        self.assertIn('<button id="undo-link"', UI_HTML)
+
+    def test_login_error_announced(self) -> None:
+        self.assertIn('id="login-err" role="alert"', UI_HTML)
+
+    def test_gradient_darkened_for_contrast(self) -> None:
+        self.assertIn("#4338CA", UI_HTML)
+
+    def test_verify_color_uses_classes(self) -> None:
+        self.assertNotIn('el.style.color = "#fca5a5"', UI_HTML)
+        self.assertIn("verify-err", UI_HTML)
+
+    def test_empty_link_uses_theme_class(self) -> None:
+        self.assertNotIn('style="color:#8ab4ff;cursor:pointer"', UI_HTML)
+        self.assertIn("linklike", UI_HTML)
+
+    def test_light_status_colors_pass(self) -> None:
+        self.assertIn("#B06000", UI_HTML)
+        self.assertIn("#174EA6", UI_HTML)
+
+    def test_search_has_name(self) -> None:
+        self.assertIn('aria-label="搜索节点', UI_HTML)
+
+    def test_row_buttons_named(self) -> None:
+        self.assertIn('aria-label="切换到 ', UI_HTML)
+
+    def test_focus_falls_back_to_search(self) -> None:
+        self.assertIn('getElementById("node-search").focus()', UI_HTML)
+
+    def test_scope_rebuilds_on_change_only(self) -> None:
+        self.assertIn("scopeSig", UI_HTML)
+
+    def test_progress_and_verify_named_live(self) -> None:
+        self.assertIn('aria-label="全量真测进度"', UI_HTML)
+        self.assertIn('id="verify-result" aria-live="polite"', UI_HTML)
+
+    def test_fullprobe_silent_cancelable(self) -> None:
+        self.assertIn('id="btn-fullprobe-cancel"', UI_HTML)
+        self.assertNotIn("全量真测已开始", UI_HTML)
+        self.assertNotIn("全量真测完成：", UI_HTML)
+
+    def test_empty_states_guide_next_action(self) -> None:
+        self.assertIn("重试刷新", UI_HTML)
+        self.assertIn("先全量真测", UI_HTML)
+
+    def test_statusbar_tri_state(self) -> None:
+        self.assertIn('id="sb-dot"', UI_HTML)
+
+    def test_unmeasured_switch_clickable(self) -> None:
+        self.assertNotIn("disabled title='先测速", UI_HTML)
+
+
 if __name__ == "__main__":
     unittest.main()
