@@ -2771,7 +2771,7 @@ class AuditFixBConsoleTests(unittest.TestCase):
         self.assertIn('aria-label="搜索节点', UI_HTML)
 
     def test_row_buttons_named(self) -> None:
-        self.assertIn('aria-label="切换到 ', UI_HTML)
+        self.assertIn("aria-label='切换到 ", UI_HTML)
 
     def test_focus_falls_back_to_search(self) -> None:
         self.assertIn('getElementById("node-search").focus()', UI_HTML)
