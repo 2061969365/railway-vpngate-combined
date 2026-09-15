@@ -2734,8 +2734,10 @@ class AuditFixAConsoleTests(unittest.TestCase):
 
     def test_probe_abort_refreshes(self) -> None:
         start = UI_HTML.index("async function probeOne")
-        block = UI_HTML[start:start + 1800]
-        self.assertGreaterEqual(block.count("refresh()"), 3)
+        end = UI_HTML.index("async function refreshNow")
+        block = UI_HTML[start:end]
+        self.assertRegex(block,
+                         r'if \(isAbort\(e\)\) \{[^}]*refresh\(\)')
 
 
 class AuditFixBConsoleTests(unittest.TestCase):
