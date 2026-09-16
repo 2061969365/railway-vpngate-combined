@@ -2380,6 +2380,11 @@ class RailwayManager:
             self.status["full_probe"]["state"] = "done"
             first_run = not self._auto_pinned and self.preferred_tag is None
             self._sync_probe_results(nodes)
+            if not first_run:
+                self._record_history(
+                    "auto-pin-skipped",
+                    f"later cycle, measure-only (auto_pinned={self._auto_pinned} "
+                    f"preferred={self.preferred_tag})")
         self._auto_pin_best(nodes, start_preferred, start_auto,
                             first_run=first_run)
         self._record_history("full-probe-done",
@@ -2422,7 +2427,6 @@ class RailwayManager:
         the serving config.
         """
         if not first_run:
-            self._record_history("auto-pin-skipped", "later cycle, measure-only")
             return
         measured = sorted(
             (n for n in nodes
