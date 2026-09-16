@@ -3312,13 +3312,46 @@ class AutoPinTests(unittest.TestCase):
                              ("203.0.113.12", 200))
             manager.preferred_tag = "vpngate-1"
             manager.status["preferred_tag"] = "vpngate-1"
+            manager.backup_tag = "vpngate-0"
+            manager.status["backup_tag"] = "vpngate-0"
             manager._auto_pinned = True
-            self._run_probe(manager, lambda node: 50)
+            with _fake_singbox(), \
+                 mock.patch.object(manager, "_apply_config",
+                                   return_value=True) as apply_mock:
+                self._run_probe(manager, lambda node: {"203.0.113.11": 60,
+                                                       "203.0.113.12": 50}[node["server"]])
+                events = [e["event"]
+                          for e in manager.status["refresh_history"]]
         finally:
             manager.stop()
 
         self.assertEqual("vpngate-1", manager.preferred_tag)
-        self.assertIsNone(manager.backup_tag)
+        self.assertEqual("vpngate-0", manager.backup_tag)
+        self.assertIn("auto-pin-skipped", events)
+        apply_mock.assert_not_called()
+
+    def test_same_best_refreshes_stale_backup(self) -> None:
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, ("203.0.113.11", 100),
+                             ("203.0.113.12", 200),
+                             ("203.0.113.13", 300))
+            manager.preferred_tag = "vpngate-2"
+            manager.status["preferred_tag"] = "vpngate-2"
+            manager.backup_tag = "vpngate-0"
+            manager.status["backup_tag"] = "vpngate-0"
+            manager._auto_pinned = True
+            self._run_probe(manager, lambda node: {"203.0.113.11": 60,
+                                                   "203.0.113.12": 50,
+                                                   "203.0.113.13": 30}[node["server"]])
+            written = _read_json(manager.config_path)
+        finally:
+            manager.stop()
+
+        self.assertEqual("vpngate-2", manager.preferred_tag)
+        self.assertEqual("vpngate-1", manager.backup_tag)
+        chain = next(o for o in written["outbounds"] if o["tag"] == "chain")
+        self.assertEqual(["vpngate-2", "vpngate-1", "auto"], chain["outbounds"])
 
     def test_auto_track_repins_to_new_best(self) -> None:
         manager = self._manager()
