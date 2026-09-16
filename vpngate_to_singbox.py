@@ -393,7 +393,7 @@ def _dial_probe_config(endpoint: dict, port: int) -> dict:
 
 
 def measure_real_latency(endpoint: dict, singbox_bin: str = "sing-box",
-                         timeout: int = 90, poll_interval: int = 2,
+                         timeout: int = 20, poll_interval: int = 2,
                          target_host: str = "www.gstatic.com",
                          target_port: int = 443,
                          path: str = "/generate_204") -> int | None:
@@ -471,7 +471,7 @@ def measure_real_latency(endpoint: dict, singbox_bin: str = "sing-box",
 
 
 def measure_exit_ip(endpoint: dict, singbox_bin: str = "sing-box",
-                    timeout: int = 90, poll_interval: int = 2) -> tuple:
+                    timeout: int = 20, poll_interval: int = 2) -> tuple:
     """Exit IP through one endpoint: (ip, ms) or (None, None).
 
     Same throwaway sing-box dial as measure_real_latency, but fetches
@@ -598,7 +598,7 @@ def snapshot_to_nodes(
     real_topk: int = 0,
     dial_fn=None,
     dial_workers: int = 3,
-    dial_timeout: int = 90,
+    dial_timeout: int = 20,
     singbox_bin: str = "sing-box",
     username: str = DEFAULT_USERNAME,
     password: str = DEFAULT_PASSWORD,
@@ -717,7 +717,7 @@ def snapshot_to_endpoints(
     real_topk: int = 0,
     dial_fn=None,
     dial_workers: int = 3,
-    dial_timeout: int = 90,
+    dial_timeout: int = 20,
     singbox_bin: str = "sing-box",
 ) -> list[dict]:
     """Parse a VPNGate CSV snapshot into tagged sing-box endpoints.
@@ -744,6 +744,7 @@ def build_singbox_config(
     mixed_users: list[tuple[str, str]] | None = None,
     final: str = "auto",
     preferred: str | None = None,
+    backup: str | None = None,
     vless_uuid: str | None = None,
     vless_direct_port: int = 8080,
     vless_direct_path: str = "/ws-node",
@@ -771,11 +772,15 @@ def build_singbox_config(
     ([preferred, "auto"]) becomes route.final instead of the bare tag, so a
     pinned node keeps hot-standby failover: preferred first, urltest group
     the instant it goes unhealthy. No serving config ever pins route.final
-    to a single endpoint.
+    to a single endpoint. Pass backup (a second endpoint tag, distinct from
+    preferred) to insert it between preferred and "auto": the chain then
+    serves best first, second as the guaranteed backup, urltest last.
     """
     tags = [ep["tag"] for ep in endpoints]
     if preferred is not None and preferred not in tags:
         preferred = None
+    if backup is not None and (backup not in tags or backup == preferred):
+        backup = None
     route_final = "chain" if preferred else final
     config: dict = {
         "log": {"level": "info"},
@@ -791,7 +796,8 @@ def build_singbox_config(
     if preferred:
         config["outbounds"].append(
             {"type": "selector", "tag": "chain",
-             "outbounds": [preferred, "auto"]})
+             "outbounds": ([preferred] + ([backup] if backup else [])
+                           + ["auto"])})
     if mixed_listen is not None and mixed_port is not None:
         inbound: dict = {"type": "mixed", "tag": "mixed-in",
                          "listen": mixed_listen, "listen_port": mixed_port}
