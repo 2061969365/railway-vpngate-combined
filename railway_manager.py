@@ -56,9 +56,10 @@ STALE_RUNNING_AFTER = 180.0
 HEALTH_CHECK_INTERVAL = 20
 PINNED_FAIL_THRESHOLD = 3
 SUPERVISE_INTERVAL = 10
-# Cold start uses a bounded Speed-ranked chunk so the first config lands in
-# seconds and /healthz goes 200 fast; periodic refreshes scan everything.
-INITIAL_PROBE_POOL = 30
+# probe_pool=0 everywhere: every refresh (boot included) discovers all
+# handshake-alive nodes; only the expensive real tunnel dial is TopK
+# (REAL_TOPK). Truncating boot discovery to the first Speed chunk used to
+# hide nodes from full_probe until the first periodic refresh.
 CRASH_BACKOFFS = (5, 10, 20, 40, 300)
 MAX_CRASH_STREAK = 5
 
@@ -342,7 +343,7 @@ html[data-theme="light"] :focus-visible{outline-color:#1a73e8}
 <section id="sec-nodes" aria-label="节点">
 <div class="glass-card">
 <h2>可用节点</h2>
-<p class="desc">默认显示 Top30 实测节点（自动刷新只测前 30）。Speed 排名不等于可拨通，首选由 urltest 实测决定，多 endpoint 兜底；要测全部点「全量真测」。点击表头可排序，未测通节点不可切换。</p>
+<p class="desc">全部节点握手发现，真拨只测 TopK（REAL_TOPK）。Speed 排名不等于可拨通，首选由 urltest 实测决定，多 endpoint 兜底；要测全部点「全量真测」。点击表头可排序，未测通节点不可切换。</p>
 <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><input id="node-search" aria-label="搜索节点（IP 或国家）" placeholder="搜索 IP / 国家…" oninput="debouncedRefresh()"><select id="sortsel" aria-label="排序"><option value="real">按实测延迟</option><option value="hand">按握手延迟</option><option value="country">按国家</option><option value="alive">按存活时间</option><option value="server">按出口 IP</option></select><button id="btn-refresh" class="btn" onclick="refreshNow()">刷新节点</button><button id="btn-fullprobe" class="btn" onclick="fullProbeNow()">全量真测</button><button id="btn-fullprobe-cancel" class="btn" style="display:none" onclick="cancelFullProbe()">取消真测</button><span class="node-count" id="node-count"></span></div>
 <select id="scope" aria-label="范围"><option value="">全部国家</option></select>
 <div id="thinbar" aria-hidden="true"><i></i></div><div id="probe-progress"><div class="bar"><div class="fill" id="probe-fill" role="progressbar" aria-label="全量真测进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div><div class="txt" id="probe-txt"></div></div>
@@ -1548,7 +1549,7 @@ class RailwayManager:
         # finishes. Without this the deploy healthcheck only sees 503.
         if self._boot_from_last_good():
             self.refresh_once()
-        elif not self.refresh_once(probe_pool=INITIAL_PROBE_POOL):
+        elif not self.refresh_once():
             self._boot_from_last_good()
 
     def _drain(self, timeout: float = DRAIN_TIMEOUT) -> bool:
