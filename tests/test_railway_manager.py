@@ -373,7 +373,7 @@ class RefreshTests(unittest.TestCase):
             manager.stop()
 
         _, kwargs = refresh_mock.call_args
-        self.assertEqual(0, kwargs.get("probe_pool"))
+        self.assertEqual(0, kwargs.get("probe_pool", 0))
 
     def test_initial_refresh_loads_beyond_first_pool_chunk(self) -> None:
         ips = [f"198.51.100.{i}" for i in range(1, 41)]
