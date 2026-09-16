@@ -2354,49 +2354,43 @@ class RailwayManager:
             self.status["full_probe"]["total"] = len(nodes)
             start_preferred = self.preferred_tag
             start_auto = self._auto_pinned
-        # Dial handshake-ascending so the fastest candidates resolve first;
-        # the first measured node can serve traffic within seconds while the
-        # rest keep dialing. done counts completions, so progress jumps as
-        # workers finish rather than in list order.
+        # Dial handshake-ascending so the fastest candidates resolve first.
+        # done counts completions, so progress jumps as workers finish
+        # rather than in list order. No pin happens mid-run: the serving
+        # pin is only set after the whole pool is measured, so cold boot
+        # never serves a blind first-finisher.
         ordered = sorted(
             nodes,
             key=lambda n: (n.get("latency_ms") is None,
                            n.get("latency_ms") or 0,
                            n.get("server") or ""))
-        first_pinned = {"done": False}
 
         def _dial_one(node: dict) -> None:
             try:
                 ms = self.dial_fn(node) if self.dial_fn else None
             except Exception:
                 ms = None
-            tag = (node.get("endpoint") or {}).get("tag")
             with self._lock:
                 node["real_latency_ms"] = ms
                 self.status["full_probe"]["done"] += 1
-                first = (ms is not None and tag
-                         and not first_pinned["done"]
-                         and start_preferred is None)
-                if first:
-                    first_pinned["done"] = True
-            if first:
-                self._auto_pin_single(tag)
 
         with ThreadPoolExecutor(max_workers=self.full_probe_workers) as executor:
             list(executor.map(_dial_one, ordered))
         with self._lock:
-            self._sync_probe_results(nodes)
             self.status["full_probe"]["state"] = "done"
-        self._auto_pin_best(nodes, start_preferred, start_auto)
+            first_run = not self._auto_pinned and self.preferred_tag is None
+            self._sync_probe_results(nodes)
+        self._auto_pin_best(nodes, start_preferred, start_auto,
+                            first_run=first_run)
         self._record_history("full-probe-done",
                              f"{len(nodes)} nodes dialed")
 
     def _auto_pin_single(self, tag: str) -> None:
         """Pin the first measured node immediately (auto track only).
 
-        Gives serving traffic a live tunnel within seconds instead of
-        waiting for the whole pool. Only fires while still unpinned;
-        the completion pass upgrades to best + backup.
+        Deprecated: kept for backward compatibility but no longer called.
+        Mid-run pins served blind first-finishers before the pool was
+        measured; pins now happen only after completion.
         """
         with self._lock:
             if self.preferred_tag is not None:
@@ -2416,14 +2410,19 @@ class RailwayManager:
         self._record_history("auto-pin-first", tag)
 
     def _auto_pin_best(self, nodes: list[dict], start_preferred: str | None,
-                       start_auto: bool) -> None:
+                       start_auto: bool, first_run: bool = True) -> None:
         """Pin best + backup after a full probe, with guards.
 
         Skips when nothing measured, when the user pinned manually mid-run,
         or when the run started pinned and the user has since switched.
-        Keeps the current pin on ties or when it still measures best, so
-        hourly cycles don't flap the serving config.
+        Later cycles only refresh measurements (keep the live connection);
+        only the first completed run pins, so cold boot serves the measured
+        best instead of a blind first-finisher. Keeps the current pin on
+        ties or when it still measures best, so hourly cycles don't flap
+        the serving config.
         """
+        if not first_run:
+            return
         measured = sorted(
             (n for n in nodes
              if n.get("real_latency_ms") is not None
