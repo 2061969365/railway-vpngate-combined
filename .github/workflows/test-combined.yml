@@ -30,7 +30,7 @@ jobs:
         with:
           python-version: "3.11"
       - name: Compile sources
-        run: python -m py_compile vpngate_to_singbox.py scripts/summarize_probe.py railway_manager.py
+        run: python -m py_compile vpngate_to_singbox.py scripts/summarize_probe.py scripts/measure_dial_times.py railway_manager.py
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
       - name: CLI smoke test on sample ovpn
@@ -193,6 +193,15 @@ jobs:
                     open("/tmp/all_eps.json", "w"), indent=2)
           print("MEASURE OK: fresh-node real-latency gate passed")
           EOF
+      - name: Time real dials across the spread (informational)
+        run: |
+          # Samples fast/mid/slow handshake nodes through the production
+          # measure_real_latency path (timeout unchanged at 90s) and reports
+          # per-node elapsed. Informational only: slow/dead nodes never fail
+          # this step; it answers "how long does a real dial actually take".
+          export PATH="$PWD/sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64:$PATH"
+          python scripts/measure_dial_times.py --csv /tmp/vpngate.csv \
+            --count 6 --timeout 90 --workers 5 | tee /tmp/dial-times.log
       - name: Dial through VPNGate and verify exit IP (disjoint nodes)
         run: |
           # Use ranked nodes [4:] — zero overlap with the top-4 the ranking
