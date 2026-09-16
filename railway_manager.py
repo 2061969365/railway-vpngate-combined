@@ -436,7 +436,7 @@ html[data-theme="light"] :focus-visible{outline-color:#1a73e8}
 var activeCountry = "";
 var lastStatus = null;
 var probeSeq = 0, fullSeq = 0, verifySeq = 0, fullT0 = 0, lastOkAt = 0;
-var searchTimer = null, pollCtl = null;
+var searchTimer = null, probeCtl = null, verifyCtl = null, fullCtl = null, autoVerifiedFor = null;
 var sortKey = "real", sortDir = 1, pendingTag = null, pendingTimer = null, scopeSig = null;
 var lastBytes = null, rateHist = {dn: [], up: []}, lastLogLines = [];
 function authHeaders() {
@@ -451,7 +451,9 @@ function showConsole() {
 }
 function backToLogin(msg) {
   probeSeq++; fullSeq++; verifySeq++;
-  if (pollCtl) { pollCtl.abort(); pollCtl = null; }
+  if (probeCtl) { probeCtl.abort(); probeCtl = null; }
+  if (verifyCtl) { verifyCtl.abort(); verifyCtl = null; }
+  if (fullCtl) { fullCtl.abort(); fullCtl = null; }
   localStorage.removeItem("admin_token");
   document.getElementById("console").style.display = "none";
   const gate = document.getElementById("login-gate");
@@ -537,11 +539,14 @@ async function api(path, method, body, signal) {
   if (!r.ok) {
     const raw = (await r.text()).slice(0, 160);
     let detail = raw;
-    try { detail = JSON.parse(raw).detail || raw; } catch (_e) {}
+    try { const j = JSON.parse(raw); detail = j.detail || j.error || raw; } catch (_e) {}
     throw new Error("HTTP " + r.status + ": " + detail);
   }
   return r.json();
 }
+function runningTagOf(msg) { const m = /"tag"\s*:\s*"([^"]+)"/.exec(msg || ""); return m ? m[1] : ""; }
+// Charset note: tags are safeTag-stripped ([a-zA-Z0-9-_]) and only minted as
+// vpngate-N, so they never contain quotes/escapes that could break [^"]+.
 function isAbort(e) { return !!e && e.name === "AbortError"; }
 function fmtMs(v) { return v == null ? "—" : v + "ms"; }
 function safeTag(t) { return String(t || "").replace(/[^a-zA-Z0-9-_]/g, ""); }
@@ -623,6 +628,7 @@ function renderAll(s) {
     document.getElementById("hero-sub").textContent =
       pref ? ("出口 " + pref.server + ":" + pref.server_port + " · 存活 " + (pref.alive_seconds || 0) + "s") : "暂无可用节点";
     renderVerify(s.verify, pref);
+    maybeAutoVerify(s);
     renderStatusbar(s, pref);
     renderTraffic(s);
     renderRoutes(s);
@@ -663,7 +669,7 @@ function renderAll(s) {
       const unmeasured = e.real_latency_ms == null;
       const unm = (!isPinned && !isPending && unmeasured) ? '<span class="badge unmeasured">未测通</span>' : "";
       const disSw = unmeasured ? " aria-disabled='true' title='先测速再切换：该节点还未测通'" : "";
-      const disPb = (e.tag === probingTag) ? " disabled title='测速中，请稍候'" : "";
+      const disPb = (e.tag === probingTag) ? " aria-disabled='true' title='测速中，请稍候'" : "";
       return "<tr class='" + (isPinned ? "pinned" : "") + (isPending ? " pending" : "") + "'><td class='hl'><span class='ip'>" + esc(e.server || e.tag) + "</span>" + pinned + pending + probing + unm + "</td><td><span class='cc'>" + esc(e.country_short) + "</span>" + esc(e.country) + "</td><td class='hl'>" + fmtMs(e.latency_ms) +
       "</td><td class='hl'>" + latBar(e.real_latency_ms) + "</td><td>" + (e.alive_seconds || 0) + "s</td>" +
       "<td class='op'><button class='opbtn' data-probe='" + t + "' aria-label='单测 " + esc(e.server || e.tag) + "'" + disPb + ">测速</button><button class='opbtn' data-switch='" + t + "' aria-label='切换到 " + esc(e.server || e.tag) + "'" + disSw + ">切换</button></td></tr>";
@@ -713,7 +719,8 @@ function renderAll(s) {
   }
 }
 function renderStatusbar(s, pref) {
-  const exitIp = (s.verify && s.verify.exit_ip) || "未验证";
+  const exitIp = (s.verify && s.verify.exit_ip) ||
+    ((s.verify && s.verify.state === "running") ? "验证中…" : "未验证");
   document.getElementById("sb-exit").textContent = exitIp;
   const pinEp = (s.endpoints || []).find(x => x.tag === s.preferred_tag) || {};
   const pinIp = pinEp.server || s.preferred_tag;
@@ -773,7 +780,7 @@ function renderRoutes(s) {
   if (!strip) return;
   strip.hidden = false;
   document.getElementById("route-direct").textContent = location.hostname + " 本机";
-  const exitIp = (s.verify && s.verify.exit_ip) || "未验证";
+  const exitIp = (s.verify && s.verify.exit_ip) || ((s.verify && s.verify.state === "running") ? "验证中…" : "未验证");
   document.getElementById("route-chain").textContent = exitIp;
 }
 function renderSub(s) {
@@ -939,9 +946,27 @@ function skeletonRows() {
   const note = document.getElementById("load-note");
   if (note) note.hidden = false;
 }
+function verifyStale(v, preferredTag) {
+  return !!(v && v.state === "done" && v.exit_ip && v.via_tag && preferredTag && v.via_tag !== preferredTag);
+}
+function maybeAutoVerify(s) {
+  if (!s || !s.preferred_tag) return;
+  const v = s.verify;
+  const needs = (!v || v.state === "idle" || verifyStale(v, s.preferred_tag));
+  if (!needs || autoVerifiedFor === s.preferred_tag) return;
+  if (document.querySelector(".btn.busy")) return;
+  if (s.probe && s.probe.state === "running") return;
+  autoVerifiedFor = s.preferred_tag;
+  verifyExit();
+}
 function renderVerify(v, pref) {
   const el = document.getElementById("verify-result");
   el.className = "";
+  const preferredTag = lastStatus ? lastStatus.preferred_tag : null;
+  if (verifyStale(v, preferredTag)) {
+    el.textContent = "已切换节点，出口待重新验证";
+    return;
+  }
   if (!v || v.state === "idle") {
     el.textContent = pref ? "尚未验证当前出口，点击「验证出口 IP」真实走一次 VPN 链路。" : "";
     return;
@@ -1014,6 +1039,7 @@ async function switchTag(tag) {
   renderFiltered();
   try {
     const r = await api("/api/switch", "POST", {"tag": tag});
+    autoVerifiedFor = r.preferred_tag || tag;
     showUndo(fromTag, r.preferred_tag || tag);
     await verifyExit();
   } catch (e) {
@@ -1024,31 +1050,46 @@ async function switchTag(tag) {
 }
 async function probeOne(tag) {
   const my = ++probeSeq;
-  if (pollCtl) pollCtl.abort();
-  pollCtl = new AbortController();
-  const sig = pollCtl.signal;
-  const btn = document.querySelector("[data-probe='" + tag + "']");
-  if (btn) { btn.disabled = true; btn.textContent = "测速中…"; }
+  if (probeCtl) probeCtl.abort();
+  probeCtl = new AbortController();
+  const sig = probeCtl.signal;
+  const probeT0 = Date.now();
+  const btn = document.querySelector("[data-probe='" + safeTag(tag) + "']");
+  if (btn) btn.textContent = "测速中…";
   try {
     await api("/api/probe", "POST", {"tag": tag}, sig);
-    for (let i = 0; i < 40; i++) {
+    refresh();
+    for (let i = 0; i < 60; i++) {
       if (my !== probeSeq) break;
       await new Promise(r => setTimeout(r, 3000));
       if (my !== probeSeq) break;
       const s = await api("/api/status", "GET", null, sig);
       lastStatus = s;
+      renderAll(s);
       if (s.probe && s.probe.state === "done" && s.probe.tag === tag) {
         if (s.probe.ms == null) toast("单测 " + tag + " 未打通", true);
         break;
       }
-      if (i === 39) toast("单测超时，请重试", true);
+      renderProbeWait(tag, probeT0);
+      if (i === 59) toast("单测超时，任务仍在后台运行，请稍后查看", true);
     }
   } catch (e) {
-    if (isAbort(e)) { refresh(); return; }
-    if (/409/.test(e.message || "")) { toast("已有单测进行中，稍后再试", true); refresh(); return; }
+    if (isAbort(e)) { restoreProbeBtn(tag); refresh(); return; }
+    if (/409/.test(e.message || "")) { const t = runningTagOf(e.message); toast("已有单测进行中，稍后再试" + (t ? "（" + t + "）" : ""), true); refresh(); return; }
     toast("单测失败: " + e.message, true);
   }
+  restoreProbeBtn(tag);
   refresh();
+}
+function renderProbeWait(tag, t0) {
+  const b = document.querySelector("[data-probe='" + safeTag(tag) + "']");
+  if (!b) return;
+  b.textContent = "测速中…（已等待" + Math.round((Date.now() - t0) / 1000) + "s）";
+}
+function restoreProbeBtn(tag) {
+  // renderAll owns button state; this only resets transient text.
+  const b = document.querySelector("[data-probe='" + safeTag(tag) + "']");
+  if (b) b.textContent = "测速";
 }
 async function refreshNow() {
   const btn = document.getElementById("btn-refresh");
@@ -1072,9 +1113,9 @@ async function refreshNow() {
 }
 async function fullProbeNow() {
   const my = ++fullSeq;
-  if (pollCtl) pollCtl.abort();
-  pollCtl = new AbortController();
-  const sig = pollCtl.signal;
+  if (fullCtl) fullCtl.abort();
+  fullCtl = new AbortController();
+  const sig = fullCtl.signal;
   setBusy("btn-fullprobe", true, "真测中…");
   const cancelBtn = document.getElementById("btn-fullprobe-cancel");
   try {
@@ -1106,7 +1147,7 @@ async function fullProbeNow() {
 }
 function cancelFullProbe() {
   fullSeq++;
-  if (pollCtl) { pollCtl.abort(); pollCtl = null; }
+  if (fullCtl) { fullCtl.abort(); fullCtl = null; }
   setBusy("btn-fullprobe", false);
   const cancelBtn = document.getElementById("btn-fullprobe-cancel");
   if (cancelBtn) cancelBtn.style.display = "none";
@@ -1114,21 +1155,22 @@ function cancelFullProbe() {
 }
 async function verifyExit() {
   const my = ++verifySeq;
-  if (pollCtl) pollCtl.abort();
-  pollCtl = new AbortController();
-  const sig = pollCtl.signal;
+  if (verifyCtl) verifyCtl.abort();
+  verifyCtl = new AbortController();
+  const sig = verifyCtl.signal;
   setBusy("btn-verify", true, "验证中…");
   document.getElementById("verify-result").textContent = "正在验证新出口…";
   const verifyT0 = Date.now();
   try {
     await api("/api/verify", "POST", {}, sig);
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 60; i++) {
       if (my !== verifySeq) break;
       await new Promise(r => setTimeout(r, 3000));
       if (my !== verifySeq) break;
       const s = await api("/api/status", "GET", null, sig);
       lastStatus = s;
-      renderVerify(s.verify);
+      const vp = (s.endpoints || []).find(e => e.tag === s.preferred_tag) || s.endpoints[0];
+      renderVerify(s.verify, vp);
       if (s.verify && s.verify.state === "done") {
         if (!s.verify.exit_ip) toast("验证未拿到出口 IP", true);
         break;
@@ -1137,12 +1179,13 @@ async function verifyExit() {
         const vr = document.getElementById("verify-result");
         vr.textContent += "（已等待 " + Math.round((Date.now() - verifyT0) / 1000) + "s）";
       }
-      if (i === 39) toast("验证超时，请重试", true);
+      if (i === 59) toast("验证超时，任务仍在后台运行，请稍后查看", true);
     }
   } catch (e) {
     if (isAbort(e)) { setBusy("btn-verify", false); refresh(); return; }
     if (/409/.test(e.message || "")) {
-      toast("已有验证进行中，稍后再试", true);
+      const t = runningTagOf(e.message);
+      toast("已有验证进行中，稍后再试" + (t ? "（" + t + "）" : ""), true);
       setBusy("btn-verify", false);
       refresh();
       return;
@@ -1195,6 +1238,7 @@ document.getElementById("bench-body").onclick = (ev) => {
   if (!link) return;
   if (link.getAttribute("aria-disabled") === "true") {
     if (link.getAttribute("data-switch")) toast("先测速再切换：该节点还未测通", true);
+    else if (link.getAttribute("data-probe")) toast("该节点测速中，请稍候", true);
     return;
   }
   const p = link.getAttribute("data-probe");
@@ -1208,8 +1252,11 @@ document.getElementById("bench-body").onkeydown = (ev) => {
   if (!link) return;
   if (link.getAttribute("aria-disabled") === "true") {
     if (link.getAttribute("data-switch")) toast("先测速再切换：该节点还未测通", true);
+    else if (link.getAttribute("data-probe")) toast("该节点测速中，请稍候", true);
+    if (ev.key === " ") ev.preventDefault();
     return;
   }
+  if (ev.key === " ") { ev.preventDefault(); return; }
   ev.preventDefault();
   const p = link.getAttribute("data-probe");
   const sw = link.getAttribute("data-switch");
@@ -1638,6 +1685,7 @@ class RailwayManager:
         self._full_probe_thread: threading.Thread | None = None
         self._single_probe_thread: threading.Thread | None = None
         self._verify_thread: threading.Thread | None = None
+        self._verify_generation = 0
         self._stop_event = threading.Event()
         self._mux_slots = threading.BoundedSemaphore(max_mux_connections)
         self._mux_inflight = 0
@@ -2332,6 +2380,7 @@ class RailwayManager:
                 self.status["backup_tag"] = None
                 self.status["auto_pinned"] = True
                 self._persist_state()
+                self._invalidate_verify(f"unpinned after {tag} failed")
         if best is None:
             self._apply_config(final="auto")
             self._record_history("auto-unpin",
@@ -2348,6 +2397,7 @@ class RailwayManager:
             self.status["backup_tag"] = second
             self.status["auto_pinned"] = True
             self._persist_state()
+        self._invalidate_verify(f"rescued to {best}")
         self._record_history(
             "auto-rescue",
             f"{tag} failed {PINNED_FAIL_THRESHOLD}x, rescued to {best}"
@@ -2388,6 +2438,7 @@ class RailwayManager:
         if not self._apply_config(final="auto", preferred=target):
             return False, "config check failed, kept previous"
         with self._lock:
+            old = self.preferred_tag
             self.preferred_tag = target
             self.backup_tag = None
             self._auto_pinned = False
@@ -2395,6 +2446,8 @@ class RailwayManager:
             self.status["backup_tag"] = None
             self.status["auto_pinned"] = False
             self._persist_state()
+        if old != target:
+            self._invalidate_verify(f"pin-changed to {target}")
         self._pinned_fail_streak = 0
         self._record_history("switch", f"final={effective}")
         return True, effective
@@ -2582,6 +2635,10 @@ class RailwayManager:
         return False
 
     def _start_full_probe(self) -> bool:
+        # State-string-only guard: check+set are atomic under the lock, so
+        # concurrent starters serialize here. Unlike single-probe/verify
+        # no thread object is consulted, so publishing the thread outside
+        # the lock is harmless — a second starter still sees "running".
         with self._lock:
             if self.status["full_probe"].get("state") == "running":
                 return False
@@ -2718,6 +2775,7 @@ class RailwayManager:
             self.status["backup_tag"] = second
             self.status["auto_pinned"] = True
             self._persist_state()
+        self._invalidate_verify(f"auto-pinned to {best}")
         self._record_history(
             "auto-pin", best + (f" backup={second}" if second else ""))
 
@@ -2776,10 +2834,13 @@ class RailwayManager:
             self.status["probe"] = {"state": "running", "tag": tag,
                                     "ms": None, "error": None,
                                     "started_at": time.monotonic()}
-        thread = threading.Thread(target=self._run_single_probe, args=(node,),
-                                  daemon=True, name=f"single-probe-{tag}")
-        self._single_probe_thread = thread
-        thread.start()
+            # Check, thread publish and start are one atomic step: a
+            # concurrent starter must see either idle or a live thread,
+            # never running-with-no-thread (which would double-accept).
+            thread = threading.Thread(target=self._run_single_probe, args=(node,),
+                                      daemon=True, name=f"single-probe-{tag}")
+            self._single_probe_thread = thread
+            thread.start()
         return True, tag
 
     def _run_single_probe(self, node: dict) -> None:
@@ -2788,18 +2849,17 @@ class RailwayManager:
         time.sleep(0.2)
         tag = node.get("endpoint", {}).get("tag")
         try:
-            ms = self.dial_fn(node)
+            ms = self.dial_fn(node) if self.dial_fn else None
             error = None
         except Exception as exc:
             ms = None
             error = f"{type(exc).__name__}: {exc}"
         with self._lock:
             node["real_latency_ms"] = ms
-            key = (node.get("server"), node.get("server_port"))
-            for ep in self.status["endpoints"]:
-                if (ep.get("server"), ep.get("server_port")) == key:
-                    ep["real_latency_ms"] = ms
-                    break
+            # Same shared helper as the full probe: updates the served row
+            # by key, appending when the endpoint list was rebuilt mid-dial
+            # so the result can never be silently dropped.
+            self._sync_probe_results([node])
             # The node was already in the sing-box config (every live node
             # gets an endpoint at refresh), so a measured node is immediately
             # switchable -- no config rebuild needed.
@@ -2827,17 +2887,21 @@ class RailwayManager:
             if self._running_fresh(cur, self._verify_thread):
                 return False, cur.get("via_tag")
             tag = node.get("endpoint", {}).get("tag")
+            self._verify_generation += 1
+            gen = self._verify_generation
             self.status["verify"] = {"state": "running", "exit_ip": None,
                                      "ms": None, "via_tag": tag,
-                                     "error": None,
+                                     "error": None, "generation": gen,
                                      "started_at": time.monotonic()}
-        thread = threading.Thread(target=self._run_verify, args=(node,),
-                                  daemon=True, name=f"verify-{tag}")
-        self._verify_thread = thread
-        thread.start()
+            # Same atomicity as single-probe: check, publish and start
+            # under one lock hold so concurrent POSTs can't double-accept.
+            thread = threading.Thread(target=self._run_verify, args=(node, gen),
+                                      daemon=True, name=f"verify-{tag}")
+            self._verify_thread = thread
+            thread.start()
         return True, tag
 
-    def _run_verify(self, node: dict) -> None:
+    def _run_verify(self, node: dict, gen: int) -> None:
         # Startup gate so /api/status readers can observe the "running"
         # state even when verify_fn returns instantly (e.g. in tests).
         time.sleep(0.2)
@@ -2851,10 +2915,29 @@ class RailwayManager:
             exit_ip, ms = None, None
             error = f"{type(exc).__name__}: {exc}"
         with self._lock:
+            if gen != self._verify_generation:
+                self._record_history("verify-discarded",
+                                     f"{tag} superseded by generation {self._verify_generation}")
+                return
             self.status["verify"] = {"state": "done", "exit_ip": exit_ip,
                                      "ms": ms, "via_tag": tag,
-                                     "error": error}
+                                     "error": error, "generation": gen}
         self._record_history("verify-done", f"{tag} exit={exit_ip} ms={ms}")
+
+    def _invalidate_verify(self, reason: str) -> None:
+        """Reset verify to idle and retire any in-flight verify thread.
+
+        Called whenever the serving pin changes: the previous exit IP no
+        longer describes the current exit, and a stale thread must not
+        overwrite the next measurement (generation mismatch discards it).
+        """
+        with self._lock:
+            self._verify_generation += 1
+            self.status["verify"] = {"state": "idle", "exit_ip": None,
+                                     "ms": None, "via_tag": None,
+                                     "error": None,
+                                     "generation": self._verify_generation}
+        self._record_history("verify-invalidated", reason)
 
     def _fetch_with_retry(self, fetch) -> str:
         last_exc: Exception | None = None

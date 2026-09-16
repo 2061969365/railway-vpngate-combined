@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from railway_manager import (UI_HTML, RailwayManager, _cpu_model, _cpu_pct,
@@ -3900,6 +3901,650 @@ class DualPinUITests(unittest.TestCase):
 
     def test_backup_label(self) -> None:
         self.assertIn("备选", UI_HTML)
+
+
+class VerifyAttributionTests(unittest.TestCase):
+    """Batch 1 (attribution chain): verify results carry a generation and
+    stale writes are discarded; pin changes invalidate the verify state."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"/tmp/railway-verifyattr-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-verifyattr-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-verifyattr-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _seed_nodes(self, manager, *ips):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": 100, "real_latency_ms": 50,
+                           "speed": 1000,
+                           "endpoint": {"tag": f"vpngate-{i}", "server": ip,
+                                        "server_port": 443}}
+                          for i, ip in enumerate(ips)]
+
+    def test_verify_generation_increments(self) -> None:
+        manager = self._manager(verify_fn=lambda ep: ("9.9.9.9", 11))
+        try:
+            self._seed_nodes(manager, "203.0.113.11")
+            node = manager._nodes[0]
+            self.assertTrue(manager._start_verify(node)[0])
+            gen1 = manager.status["verify"]["generation"]
+            manager._verify_thread.join(timeout=30)
+            self.assertTrue(manager._start_verify(node)[0])
+            gen2 = manager.status["verify"]["generation"]
+            manager._verify_thread.join(timeout=30)
+        finally:
+            manager.stop()
+
+        self.assertIsInstance(gen1, int)
+        self.assertGreater(gen2, gen1)
+
+    def test_stale_verify_write_discarded_after_switch(self) -> None:
+        gate = threading.Event()
+
+        def _blocked_verify(endpoint):
+            gate.wait(timeout=30)
+            server = endpoint.get("server")
+            return ({"203.0.113.11": "9.9.9.11",
+                     "203.0.113.12": "9.9.9.12"}[server], 11)
+
+        manager = self._manager(verify_fn=_blocked_verify)
+        try:
+            self._seed_nodes(manager, "203.0.113.11", "203.0.113.12")
+            node_a = manager._nodes[0]
+            self.assertTrue(manager._start_verify(node_a)[0])
+            with _fake_singbox():
+                ok, _ = manager.switch(tag="vpngate-1")
+            self.assertTrue(ok)
+            gate.set()
+            manager._verify_thread.join(timeout=30)
+            snap = manager.status["verify"]
+            events = [h["event"] for h in manager.status["refresh_history"]]
+        finally:
+            gate.set()
+            manager.stop()
+
+        self.assertEqual("vpngate-1", manager.preferred_tag)
+        self.assertEqual("idle", snap["state"])
+        self.assertIsNone(snap["exit_ip"])
+        self.assertIn("verify-discarded", events)
+
+    def test_switch_resets_verify_to_idle(self) -> None:
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, "203.0.113.11", "203.0.113.12")
+            with manager._lock:
+                manager.status["verify"] = {"state": "done",
+                                            "exit_ip": "203.0.113.99",
+                                            "ms": 100, "via_tag": "vpngate-0",
+                                            "error": None}
+            with _fake_singbox():
+                ok, _ = manager.switch(tag="vpngate-1")
+            snap = manager.status["verify"]
+        finally:
+            manager.stop()
+
+        self.assertTrue(ok)
+        self.assertEqual("idle", snap["state"])
+        self.assertIsNone(snap["exit_ip"])
+
+    def test_auto_pin_resets_verify(self) -> None:
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, "203.0.113.11", "203.0.113.12")
+            with manager._lock:
+                manager.status["verify"] = {"state": "done",
+                                            "exit_ip": "203.0.113.99",
+                                            "ms": 100, "via_tag": "vpngate-0",
+                                            "error": None}
+            with _fake_singbox():
+                manager._auto_pin_best(manager._nodes, None)
+            snap = manager.status["verify"]
+        finally:
+            manager.stop()
+
+        self.assertEqual("vpngate-0", manager.preferred_tag)
+        self.assertEqual("idle", snap["state"])
+        self.assertIsNone(snap["exit_ip"])
+
+    def test_rescue_resets_verify(self) -> None:
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, "203.0.113.11", "203.0.113.12")
+            with manager._lock:
+                manager.preferred_tag = "vpngate-0"
+                manager.status["preferred_tag"] = "vpngate-0"
+                manager.status["verify"] = {"state": "done",
+                                            "exit_ip": "203.0.113.99",
+                                            "ms": 100, "via_tag": "vpngate-0",
+                                            "error": None}
+            failing = lambda host, port, timeout=5: 0
+            with _fake_singbox():
+                self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+                self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+                result = manager.check_pinned_health(probe_fn=failing)
+            snap = manager.status["verify"]
+        finally:
+            manager.stop()
+
+        self.assertEqual("rescued", result)
+        self.assertEqual("idle", snap["state"])
+        self.assertIsNone(snap["exit_ip"])
+
+
+class VerifyAttributionUiTests(unittest.TestCase):
+    """Batch 1 (attribution chain), console side."""
+
+    def test_render_verify_marks_stale_via_tag(self) -> None:
+        self.assertIn("via_tag", UI_HTML)
+        self.assertIn("重新验证", UI_HTML)
+
+    def test_auto_verify_trigger_present(self) -> None:
+        self.assertIn("maybeAutoVerify", UI_HTML)
+        self.assertIn("autoVerifiedFor", UI_HTML)
+
+
+class ProbeObserveUiTests(unittest.TestCase):
+    """Batch 2 (observation chain), console side."""
+
+    def _probe_block(self) -> str:
+        start = UI_HTML.index("async function probeOne")
+        end = UI_HTML.index("async function refreshNow")
+        return UI_HTML[start:end]
+
+    def test_controllers_split_per_task(self) -> None:
+        self.assertIn("probeCtl", UI_HTML)
+        self.assertIn("verifyCtl", UI_HTML)
+        self.assertIn("fullCtl", UI_HTML)
+        self.assertNotIn("pollCtl", UI_HTML)
+
+    def test_probe_poll_renders_each_round(self) -> None:
+        block = self._probe_block()
+        self.assertRegex(block, r"renderAll\(s\)")
+        self.assertRegex(block, r"renderProbeWait\(tag")
+
+    def test_probe_shows_elapsed_wait(self) -> None:
+        self.assertIn("已等待", self._probe_block())
+
+    def test_busy_probe_row_explains_itself(self) -> None:
+        self.assertIn("该节点测速中，请稍候", UI_HTML)
+        start = UI_HTML.index('document.getElementById("bench-body").onclick')
+        end = UI_HTML.index("setInterval(() => {")
+        delegation = UI_HTML[start:end]
+        self.assertEqual(2, delegation.count("该节点测速中，请稍候"))
+
+    def test_space_key_defers_to_click(self) -> None:
+        start = UI_HTML.index('document.getElementById("bench-body").onkeydown')
+        block = UI_HTML[start:start + 1400]
+        self.assertIn('if (ev.key === " ") { ev.preventDefault(); return; }',
+                      block)
+        space_at = block.index('if (ev.key === " ") { ev.preventDefault(); return; }')
+        enter_tail = block[space_at:]
+        self.assertIn("probeOne(p)", enter_tail)
+        self.assertIn("switchTag(sw)", enter_tail)
+
+
+class VerifyAttributionUiTests(unittest.TestCase):
+    """Batch 1 (attribution chain), console side."""
+
+    def test_render_verify_marks_stale_via_tag(self) -> None:
+        self.assertIn("via_tag", UI_HTML)
+        self.assertIn("重新验证", UI_HTML)
+
+    def test_auto_verify_trigger_present(self) -> None:
+        self.assertIn("maybeAutoVerify", UI_HTML)
+        self.assertIn("autoVerifiedFor", UI_HTML)
+
+
+class VerifyAttributionHarnessTests(unittest.TestCase):
+    """Purpose harness: the served console JS must show the right exit IP
+    at the right time (stale hidden, auto identify once, switch verifies
+    new node once, no loops). Runs scripts/verify_attribution_stub.js in
+    node against the RUNTIME UI_HTML, like test_served_js_parses."""
+
+    def test_served_attribution_flow(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node not installed")
+        blocks = re.findall(r"<script>(.*?)</script>", UI_HTML, re.S)
+        mains = [b for b in blocks if "function probeOne" in b]
+        self.assertEqual(1, len(mains))
+        stub = (Path(__file__).resolve().parent.parent / "scripts" /
+                "verify_attribution_stub.js")
+        self.assertTrue(stub.is_file())
+        with tempfile.NamedTemporaryFile("w", suffix=".js",
+                                         delete=False,
+                                         encoding="utf-8") as handle:
+            handle.write(mains[0])
+            page_path = handle.name
+        try:
+            result = subprocess.run([node, str(stub), page_path],
+                                    capture_output=True, text=True,
+                                    timeout=120)
+        finally:
+            os.unlink(page_path)
+        self.assertEqual(0, result.returncode,
+                         result.stdout + result.stderr)
+        for marker in ("PASS A1:", "PASS A2:", "PASS B:", "PASS C:",
+                       "PASS D:", "ALL PASS"):
+            self.assertIn(marker, result.stdout)
+
+
+class VerifyAttributionHttpTests(unittest.TestCase):
+    """Purpose over real HTTP: stale IP cleared on switch, races never
+    show the wrong IP, and the boot path can reach identification."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+    IP_OF = {"203.0.113.11": "9.9.9.11", "203.0.113.12": "9.9.9.12"}
+
+    def _manager(self, tmpdir: str, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(),
+                        start_singbox=False, auto_refresh=False,
+                        fetch_on_start=False, admin_token=self.TOKEN,
+                        config_path=f"{tmpdir}/singbox.json",
+                        nodes_path=f"{tmpdir}/nodes.json",
+                        state_path=f"{tmpdir}/state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _seed_nodes(self, manager, *ips):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": 100, "real_latency_ms": 50,
+                           "speed": 1000,
+                           "endpoint": {"tag": f"vpngate-{i}", "server": ip,
+                                        "server_port": 443}}
+                          for i, ip in enumerate(ips)]
+
+    def _raw(self, port: int, method: str, path: str,
+             body: bytes | None = None) -> tuple[str, bytes]:
+        sock = socket.create_connection(("127.0.0.1", port), timeout=10)
+        with sock:
+            headers = (f"{method} {path} HTTP/1.1\r\nHost: x\r\n"
+                       f"Authorization: Bearer {self.TOKEN}\r\n")
+            if body is not None:
+                headers += f"Content-Length: {len(body)}\r\n"
+            sock.sendall(headers.encode() + b"\r\n" + (body or b""))
+            response = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                response += chunk
+        head, _, resp_body = response.partition(b"\r\n\r\n")
+        return head.decode("latin-1").split("\r\n")[0], resp_body
+
+    def _get_status(self, port: int) -> dict:
+        _, body = self._raw(port, "GET", "/api/status")
+        return json.loads(body.decode())
+
+    def _post(self, port: int, path: str, payload: dict) -> tuple[str, dict]:
+        line, body = self._raw(port, "POST", path, json.dumps(payload).encode())
+        return line, json.loads(body.decode())
+
+    def _wait_verify_done(self, port: int, timeout: float = 20.0) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            snap = self._get_status(port)["verify"]
+            if snap["state"] == "done":
+                return snap
+            time.sleep(0.2)
+        raise AssertionError("verify never reached done: %r" % (snap,))
+
+    def test_http_switch_clears_stale_ip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                self._seed_nodes(manager, "203.0.113.11", "203.0.113.12")
+                with manager._lock:
+                    manager.status["verify"] = {
+                        "state": "done", "exit_ip": "9.9.9.11", "ms": 100,
+                        "via_tag": "vpngate-0", "error": None}
+                port = manager.start()
+                with _fake_singbox():
+                    line, _ = self._post(port, "/api/switch",
+                                         {"tag": "vpngate-1"})
+                    self.assertIn("200", line)
+                    snap = self._get_status(port)["verify"]
+            finally:
+                manager.stop()
+
+        self.assertEqual("idle", snap["state"])
+        self.assertIsNone(snap["exit_ip"])
+
+    def test_http_race_never_shows_wrong_ip(self) -> None:
+        gate = threading.Event()
+
+        def _blocked_verify(endpoint):
+            gate.wait(timeout=30)
+            return (self.IP_OF[endpoint["server"]], 11)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir, verify_fn=_blocked_verify)
+            try:
+                self._seed_nodes(manager, "203.0.113.11", "203.0.113.12")
+                port = manager.start()
+                with _fake_singbox():
+                    line1, _ = self._post(port, "/api/verify", {})
+                    self.assertIn("202", line1)
+                    time.sleep(0.6)
+                    line2, _ = self._post(port, "/api/switch",
+                                          {"tag": "vpngate-1"})
+                    self.assertIn("200", line2)
+                    line3, _ = self._post(port, "/api/verify", {})
+                    self.assertIn("202", line3)
+                    gate.set()
+                    seen = []
+                    deadline = time.monotonic() + 20.0
+                    while time.monotonic() < deadline:
+                        snap = self._get_status(port)["verify"]
+                        seen.append((snap["state"], snap["via_tag"],
+                                     snap["exit_ip"]))
+                        if snap["state"] == "done":
+                            break
+                        time.sleep(0.2)
+            finally:
+                gate.set()
+                manager.stop()
+
+        self.assertEqual("done", snap["state"])
+        self.assertEqual("vpngate-1", snap["via_tag"])
+        self.assertEqual("9.9.9.12", snap["exit_ip"])
+        self.assertNotIn(("done", "vpngate-0", "9.9.9.11"), seen)
+
+    def test_first_identification_end_to_end(self) -> None:
+        ip_of = self.IP_OF
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(
+                tmpdir, dial_fn=lambda node: 50,
+                verify_fn=lambda ep: (ip_of[ep["server"]], 42))
+            try:
+                with _fake_singbox(), \
+                     mock.patch("railway_manager.probe_tcp_latency",
+                                return_value=100):
+                    self.assertTrue(manager.refresh_once(
+                        fetcher=lambda url, timeout: _snapshot_csv(
+                            "203.0.113.11", "203.0.113.12")))
+                    manager._full_probe_thread.join(timeout=60)
+                port = manager.start()
+                with _fake_singbox():
+                    line, body = self._post(port, "/api/verify", {})
+                    self.assertIn("202", line)
+                    snap = self._wait_verify_done(port)
+            finally:
+                manager.stop()
+
+        self.assertEqual(manager.preferred_tag, snap["via_tag"])
+        pinned = next(n for n in manager._nodes
+                      if n["endpoint"]["tag"] == manager.preferred_tag)
+        self.assertEqual(ip_of[pinned["server"]], snap["exit_ip"])
+
+
+class ConcurrentStartTests(unittest.TestCase):
+    """Batch 3 (concurrency slots): concurrent double starts accept
+    exactly once — check, thread publish and start are atomic."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"/tmp/railway-race-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-race-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-race-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _seed_nodes(self, manager, *ips):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": 100, "real_latency_ms": 50,
+                           "speed": 1000,
+                           "endpoint": {"tag": f"vpngate-{i}", "server": ip,
+                                        "server_port": 443}}
+                          for i, ip in enumerate(ips)]
+
+    def _race_starts(self, starter):
+        """Run starter() from two threads rendezvoused inside thread
+        creation, so both overlap the check-then-publish window.
+
+        The main thread joins the barrier to release the first starter
+        promptly under fixed code; under racy code both starters trip it
+        together and both get accepted (the failure this guards)."""
+        import threading as th_mod
+        entered = threading.Event()
+        gate = threading.Barrier(2)
+
+        class SlowThread(th_mod.Thread):
+            def __init__(self, *args, **kwargs):
+                entered.set()
+                # Fail loudly on timeout: a broken rendezvous would make
+                # this a timing race instead of a forced overlap.
+                gate.wait(timeout=10)
+                super().__init__(*args, **kwargs)
+
+        results = []
+        hitters = [th_mod.Thread(target=lambda: results.append(starter()))
+                   for _ in range(2)]
+        with mock.patch.object(th_mod, "Thread", SlowThread):
+            hitters[0].start()
+            self.assertTrue(entered.wait(timeout=30))
+            hitters[1].start()
+            gate.wait(timeout=10)
+            for w in hitters:
+                w.join(30)
+        return results
+
+    def test_concurrent_verify_starts_single_accept(self) -> None:
+        manager = self._manager(verify_fn=lambda ep: ("9.9.9.9", 1))
+        try:
+            self._seed_nodes(manager, "203.0.113.11")
+            results = self._race_starts(
+                lambda: manager._start_verify(manager._nodes[0]))
+            manager._verify_thread.join(timeout=30)
+        finally:
+            manager.stop()
+
+        self.assertEqual(2, len(results))
+        self.assertEqual(1, sum(1 for ok, _ in results if ok))
+
+    def test_concurrent_probe_starts_single_accept(self) -> None:
+        manager = self._manager(dial_fn=lambda node: 7)
+        try:
+            self._seed_nodes(manager, "203.0.113.11")
+            results = self._race_starts(
+                lambda: manager._start_single_probe(manager._nodes[0]))
+            manager._single_probe_thread.join(timeout=30)
+        finally:
+            manager.stop()
+
+        self.assertEqual(2, len(results))
+        self.assertEqual(1, sum(1 for ok, _ in results if ok))
+
+
+class SlotFeedbackUiTests(unittest.TestCase):
+    """Batch 3 (concurrency slots), console side: 409 names the running
+    task, and poll windows match the backend staleness window."""
+
+    def _probe_block(self) -> str:
+        start = UI_HTML.index("async function probeOne")
+        return UI_HTML[start:UI_HTML.index("async function refreshNow")]
+
+    def _verify_block(self) -> str:
+        start = UI_HTML.index("async function verifyExit")
+        return UI_HTML[start:UI_HTML.index("silentLogin();")]
+
+    def test_api_reads_error_field(self) -> None:
+        self.assertIn("j.detail || j.error || raw", UI_HTML)
+
+    def test_running_tag_helper_present(self) -> None:
+        self.assertIn("function runningTagOf", UI_HTML)
+
+    def test_probe_409_names_running_tag(self) -> None:
+        block = self._probe_block()
+        self.assertIn("runningTagOf(e.message)", block)
+        self.assertIn("已有单测进行中，稍后再试", block)
+
+    def test_verify_409_names_running_tag(self) -> None:
+        block = self._verify_block()
+        self.assertIn("runningTagOf(e.message)", block)
+        self.assertIn("已有验证进行中，稍后再试", block)
+
+    def test_poll_windows_cover_staleness(self) -> None:
+        self.assertIn("for (let i = 0; i < 60; i++)", self._probe_block())
+        self.assertIn("for (let i = 0; i < 60; i++)", self._verify_block())
+
+    def test_timeout_says_background_continues(self) -> None:
+        self.assertIn("仍在后台运行", self._probe_block())
+        self.assertIn("仍在后台运行", self._verify_block())
+
+
+class SingleProbeWritebackTests(unittest.TestCase):
+    """Batch 4 (write-back chain): single-probe results land on the
+    served endpoints even when the endpoint list was rebuilt mid-dial,
+    and a missing dial_fn is a clean None, not a TypeError."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"/tmp/railway-spw-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-spw-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-spw-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _post_json(self, manager, path, payload):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        raw = json.dumps(payload).encode()
+        headers = (f"POST {path} HTTP/1.1\r\nContent-Length: {len(raw)}\r\n"
+                   f"Authorization: Bearer {self.TOKEN}\r\n")
+        client = FakeClient()
+        manager._handle_http(client, (headers + "\r\n").encode("latin-1") + raw)
+        head, _, body = client.sent.partition(b"\r\n\r\n")
+        return head.decode("latin-1").split("\r\n")[0], body
+
+    def test_probe_appends_missing_endpoint(self) -> None:
+        manager = self._manager(dial_fn=lambda node: 77)
+        try:
+            manager._nodes = [{"server": "203.0.113.11", "server_port": 443,
+                               "country": "Japan", "country_short": "JP",
+                               "latency_ms": 100, "real_latency_ms": None,
+                               "speed": 1000,
+                               "endpoint": {"tag": "vpngate-0",
+                                            "server": "203.0.113.11",
+                                            "server_port": 443}}]
+            with manager._lock:
+                manager.status["endpoints"] = [
+                    {"tag": "vpngate-9", "server": "198.51.100.9",
+                     "server_port": 443, "country": "Japan",
+                     "country_short": "JP", "latency_ms": 100,
+                     "real_latency_ms": None, "speed": 1000}]
+            line, _ = self._post_json(manager, "/api/probe",
+                                      {"tag": "vpngate-0"})
+            self.assertIn("202", line)
+            manager._single_probe_thread.join(timeout=30)
+            shown = [ep for ep in manager.status["endpoints"]
+                     if ep.get("real_latency_ms") == 77]
+        finally:
+            manager.stop()
+
+        self.assertEqual(1, len(shown))
+        self.assertEqual("203.0.113.11", shown[0]["server"])
+        self.assertEqual(2, len(manager.status["endpoints"]))
+        self.assertNotEqual("vpngate-9", shown[0]["tag"])
+        self.assertTrue(shown[0]["tag"].startswith("vpngate-"))
+        self.assertEqual(77, manager._nodes[0]["real_latency_ms"])
+
+    def test_probe_updates_matching_endpoint_in_place(self) -> None:
+        manager = self._manager(dial_fn=lambda node: 55)
+        try:
+            manager._nodes = [{"server": "203.0.113.11", "server_port": 443,
+                               "country": "Japan", "country_short": "JP",
+                               "latency_ms": 100, "real_latency_ms": None,
+                               "speed": 1000,
+                               "endpoint": {"tag": "vpngate-0",
+                                            "server": "203.0.113.11",
+                                            "server_port": 443}}]
+            with manager._lock:
+                manager.status["endpoints"] = [
+                    {"tag": "vpngate-0", "server": "203.0.113.11",
+                     "server_port": 443, "country": "Japan",
+                     "country_short": "JP", "latency_ms": 100,
+                     "real_latency_ms": None, "speed": 1000}]
+            line, _ = self._post_json(manager, "/api/probe",
+                                      {"tag": "vpngate-0"})
+            self.assertIn("202", line)
+            manager._single_probe_thread.join(timeout=30)
+            endpoints = manager.status["endpoints"]
+        finally:
+            manager.stop()
+
+        self.assertEqual(1, len(endpoints))
+        self.assertEqual("vpngate-0", endpoints[0]["tag"])
+        self.assertEqual(55, endpoints[0]["real_latency_ms"])
+
+    def test_probe_without_dial_fn_is_clean_none(self) -> None:
+        manager = self._manager()
+        # NOTE: assign directly — passing dial_fn=None to the constructor
+        # selects the default real dial instead of disabling it.
+        manager.dial_fn = None
+        try:
+            manager._nodes = [{"server": "203.0.113.11", "server_port": 443,
+                               "country": "Japan", "country_short": "JP",
+                               "latency_ms": 100, "real_latency_ms": None,
+                               "speed": 1000,
+                               "endpoint": {"tag": "vpngate-0",
+                                            "server": "203.0.113.11",
+                                            "server_port": 443}}]
+            line, _ = self._post_json(manager, "/api/probe",
+                                      {"tag": "vpngate-0"})
+            self.assertIn("202", line)
+            manager._single_probe_thread.join(timeout=30)
+            probe = manager.status["probe"]
+        finally:
+            manager.stop()
+
+        self.assertEqual("done", probe["state"])
+        self.assertIsNone(probe["ms"])
+        self.assertIsNone(probe["error"])
+
+
+class VerifyRunningUiTests(unittest.TestCase):
+    """Batch 4 (small items), console side: running verify reads as
+    verifying (not unverified), and the verify loop passes context."""
+
+    def _statusbar_block(self) -> str:
+        start = UI_HTML.index("function renderStatusbar")
+        return UI_HTML[start:UI_HTML.index("function renderTraffic")]
+
+    def _verify_block(self) -> str:
+        start = UI_HTML.index("async function verifyExit")
+        return UI_HTML[start:UI_HTML.index("silentLogin();")]
+
+    def test_statusbar_shows_verifying(self) -> None:
+        self.assertIn("验证中…", self._statusbar_block())
+
+    def test_verify_loop_passes_pref(self) -> None:
+        self.assertIn("renderVerify(s.verify,", self._verify_block())
 
 
 if __name__ == "__main__":
