@@ -73,12 +73,11 @@ UI_HTML = """\
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh}
 body::before{content:"";position:fixed;inset:0;z-index:-1;background:radial-gradient(ellipse 55% 40% at 75% 8%,rgba(99,102,241,.28),transparent 70%),radial-gradient(ellipse 45% 35% at 12% 25%,rgba(34,211,238,.16),transparent 70%),radial-gradient(ellipse 50% 45% at 50% 100%,rgba(16,185,129,.14),transparent 70%),#000}
-#topnav{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:26px;padding:14px 32px;font-size:14px;background:rgba(10,12,24,.72);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-bottom:1px solid rgba(255,255,255,.09)}
+#topnav{position:sticky;top:0;z-index:50;display:flex;align-items:center;gap:26px;padding:14px 32px;font-size:14px;background:rgba(10,12,24,.88);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);border-bottom:1px solid rgba(255,255,255,.09)}
 #topnav .logo{font-weight:800;font-size:16px;background:linear-gradient(90deg,#a5b4fc,#67e8f9);-webkit-background-clip:text;background-clip:text;color:transparent}
 #topnav .live{font-size:11px;color:#6ee7b7;border:1px solid rgba(110,231,183,.4);border-radius:999px;padding:2px 10px}
 #topnav .links{display:flex;gap:22px;color:#ccc}
 #topnav .right{margin-left:auto;display:flex;gap:14px;align-items:center}
-#topnav input{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);color:#fff;border-radius:10px;padding:7px 12px;font-size:13px}
 #topnav .cta{border:1px solid rgba(255,255,255,.2);border-radius:999px;padding:7px 18px;cursor:pointer;background:rgba(255,255,255,.06)}
 #topnav .cta:hover{background:rgba(255,255,255,.14)}
 .wrap{max-width:1180px;margin:0 auto;padding:34px 28px 60px}
@@ -92,7 +91,7 @@ body::before{content:"";position:fixed;inset:0;z-index:-1;background:radial-grad
 .verify-ok{color:#6ee7b7}.verify-err{color:#fca5a5}
 .linklike{color:#8ab4ff;cursor:pointer;text-decoration:none}
 .linklike:hover{text-decoration:underline}
-.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:14px;margin-bottom:22px}
 .stat{background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:16px 18px;backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px)}
 .stat .k{font-size:12px;color:#8b91a5}
 .stat .v{font-size:24px;font-weight:700;margin-top:4px}
@@ -163,10 +162,12 @@ table.bench td.hl{color:#fff;font-weight:600}
 #console.hidden{display:none}
 #btn-lock{border:1px solid rgba(255,255,255,.2);border-radius:999px;padding:7px 18px;cursor:pointer;background:rgba(255,255,255,.06);font-size:13px;color:#ddd}
 #btn-lock:hover{background:rgba(255,255,255,.14)}
-@media(max-width:768px){#hero-kicker{font-size:34px}.wrap{padding:20px 14px 44px}.stats{grid-template-columns:repeat(2,1fr)}#topnav .links{display:none}}
+@media(max-width:768px){#hero-kicker{font-size:34px}.wrap{padding:20px 14px 44px}.stats{grid-template-columns:repeat(2,1fr)}#topnav{gap:14px}#topnav .links{display:flex;gap:8px;overflow-x:auto;flex:none;max-width:46vw}#topnav .links a{padding:6px 10px;font-size:12px;white-space:nowrap}}
 #bench-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
 table.bench{min-width:560px}
 @media(max-width:640px){.wrap{padding:16px 12px 40px}.glass-card{padding:20px 16px;border-radius:18px}#hero-kicker{font-size:30px}.stats{gap:10px}.stat{padding:12px 14px}.stat .v{font-size:20px}#node-search{width:100%;max-width:none}.actions .btn{flex:1 1 100%;text-align:center}#topnav{padding:12px 16px;gap:14px}#topnav .live{display:none}.glass-card,.stat{backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px)}#toast{right:max(12px,env(safe-area-inset-right));bottom:max(12px,env(safe-area-inset-bottom));left:max(12px,env(safe-area-inset-left))}.toast-msg{max-width:none}}
+@media(max-width:640px){table.bench th:first-child,table.bench td:first-child{position:sticky;left:0;background:#0b0e1c;z-index:2}table.bench th:last-child,table.bench td:last-child{position:sticky;right:0;background:#0b0e1c;z-index:2}}
+html[data-theme="light"] table.bench th:first-child,html[data-theme="light"] table.bench td:first-child,html[data-theme="light"] table.bench th:last-child,html[data-theme="light"] table.bench td:last-child{background:#fff}
 /* v2 新增元素（与深色皮肤同语言） */
 .num,.stat .v{font-variant-numeric:tabular-nums}
 #topnav .links a{color:#ccc;text-decoration:none;font-size:13px;padding:6px 12px;border-radius:10px}
@@ -174,7 +175,7 @@ table.bench{min-width:560px}
 #topnav .links a.on{color:#fff;background:rgba(255,255,255,.1)}
 #btn-theme{border:1px solid rgba(255,255,255,.2);border-radius:999px;padding:7px 18px;cursor:pointer;background:rgba(255,255,255,.06);font-size:13px;color:#ddd}
 #btn-theme:hover{background:rgba(255,255,255,.14)}
-#statusbar{position:sticky;top:57px;z-index:49;display:flex;gap:20px;align-items:center;flex-wrap:wrap;background:rgba(10,12,24,.72);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);padding:9px 32px;border-bottom:1px solid rgba(255,255,255,.09);font-size:12.5px;color:#a8adbd}
+#statusbar{position:sticky;top:57px;z-index:49;display:flex;gap:20px;align-items:center;flex-wrap:wrap;background:rgba(10,12,24,.88);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px);padding:9px 32px;border-bottom:1px solid rgba(255,255,255,.09);font-size:12.5px;color:#a8adbd}
 #statusbar b{color:#fff;font-weight:600;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
 #statusbar .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:#6ee7b7;margin-right:6px;box-shadow:0 0 8px #6ee7b7}
 #statusbar .dot.stale{background:#fbbf24;box-shadow:0 0 8px #fbbf24}
@@ -188,9 +189,16 @@ section{scroll-margin-top:130px}
 #spark{width:100%;height:64px;display:block}
 .rate-legend{display:flex;gap:18px;font-size:12px;color:#8b91a5;margin-top:8px}
 .rate-legend i{display:inline-block;width:18px;height:2px;vertical-align:middle;margin-right:6px}
-#sortsel,#scope{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);color:#fff;border-radius:10px;padding:8px 10px;font-size:13px}
-#sortsel option,#scope option{background:#121826}
+#sortsel,#scope,#loglevel,#log-search{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);color:#fff;border-radius:10px;padding:8px 10px;font-size:13px}
+#sortsel option,#scope option,#loglevel option{background:#121826}
 .node-count{margin-left:auto;font-size:12px;color:#8b91a5}
+.errchip{display:inline-block;font-size:11px;border-radius:999px;padding:2px 10px;margin-left:8px;background:rgba(251,191,36,.15);color:#fbbf24;border:1px solid rgba(251,191,36,.4);font-weight:400}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.subtag{display:inline-block;font-size:11px;border-radius:8px;padding:2px 10px;margin-right:10px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);color:#ddd;white-space:nowrap;flex:none}
+.hostnote{font-size:12px;color:#8b91a5;margin-top:10px}
+.logtools{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
+.logtools .chk{font-size:12.5px;color:#a8adbd;display:flex;gap:6px;align-items:center;cursor:pointer;white-space:nowrap}
+#log-search{width:180px}
 table.bench th.sortable{cursor:pointer;user-select:none}
 table.bench th.sortable:hover{color:#fff}
 .thsort{background:none;border:none;color:inherit;font:inherit;font-size:inherit;cursor:pointer;padding:6px 8px;margin:-6px -8px;min-height:28px;border-radius:8px;white-space:nowrap}
@@ -247,8 +255,8 @@ html[data-theme="light"] .btn:active{transform:none}
 html[data-theme="light"] #btn-verify{background:#1a73e8;box-shadow:none}
 html[data-theme="light"] #btn-verify:hover{background:#1b66c9}
 html[data-theme="light"] #btn-fullprobe{border-color:#1a73e8;color:#1a73e8;background:#fff}
-html[data-theme="light"] #node-search,html[data-theme="light"] #sortsel,html[data-theme="light"] #scope,html[data-theme="light"] #loglevel{background:#fff;border-color:#dadce0;color:#202124}
-html[data-theme="light"] #sortsel option,html[data-theme="light"] #scope option{background:#fff}
+html[data-theme="light"] #node-search,html[data-theme="light"] #sortsel,html[data-theme="light"] #scope,html[data-theme="light"] #loglevel,html[data-theme="light"] #log-search{background:#fff;border-color:#dadce0;color:#202124}
+html[data-theme="light"] #sortsel option,html[data-theme="light"] #scope option,html[data-theme="light"] #loglevel option{background:#fff}
 html[data-theme="light"] #thinbar{background:#e8eaed}
 html[data-theme="light"] #thinbar i{background:#1a73e8}
 html[data-theme="light"] #probe-progress .bar{background:#e8eaed}
@@ -291,19 +299,24 @@ html[data-theme="light"] .login-card .sub{color:#5f6368}
 html[data-theme="light"] #login-token{background:#fff;border-color:#dadce0;color:#202124}
 html[data-theme="light"] #btn-login{background:#1a73e8;box-shadow:none}
 html[data-theme="light"] #login-err{color:#d93025}
+html[data-theme="light"] .errchip{background:#fef7e0;color:#7A4A00;border-color:#fde293}
+html[data-theme="light"] .subtag{background:#f1f3f4;border-color:#dadce0;color:#5f6368}
+html[data-theme="light"] .hostnote,html[data-theme="light"] .logtools .chk{color:#5f6368}
+html[data-theme="light"] .toast-msg{background:#fff;color:#3c4043;border-color:#dadce0}
+html[data-theme="light"] .toast-msg.err{background:#fff;color:#d93025;border-color:#d93025}
 html[data-theme="light"] :focus-visible{outline-color:#1a73e8}
 @media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
 
 </style></head>
 <body>
-<div id="topnav"><span class="logo">vpngate</span><span class="live">● LIVE</span><span class="links"><a href="#sec-overview">总览</a><a href="#sec-nodes">节点</a><a href="#sec-logs">日志</a><a href="#sec-sub">订阅</a><a href="#sec-hist">事件</a></span><span class="right"><button id="btn-theme" onclick="toggleTheme()">浅色</button><button id="btn-lock" onclick="lockConsole()">锁定</button></span></div>
-<div id="statusbar" aria-label="实时状态"><span><span class="dot" id="sb-dot"></span>出口 <b id="sb-exit">—</b></span><span>节点 <b id="sb-node">—</b></span><span class="sp"></span><span>↓ <b id="rate-dn">—</b> Mb/s</span><span>↑ <b id="rate-up">—</b> Mb/s</span></div>
-<div id="login-gate"><div class="login-card glass-card"><div class="logo">vpngate</div><div class="sub">输入 ADMIN_TOKEN 进入控制台</div><input id="login-token" type="password" autocomplete="off" aria-label="ADMIN_TOKEN" aria-describedby="login-err" placeholder="ADMIN_TOKEN" onkeydown="if(event.key==='Enter')loginEnter()"><button id="btn-login" onclick="loginEnter()">进入控制台</button><p id="login-err" role="alert"></p></div></div>
+<div id="topnav"><span class="logo">vpngate</span><span class="live" title="自动刷新每15秒">● <span lang="en">LIVE</span></span><span class="links"><a href="#sec-overview">总览</a><a href="#sec-nodes">节点</a><a href="#sec-logs">日志</a><a href="#sec-sub" id="nav-sub">订阅</a><a href="#sec-hist">事件</a></span><span class="right"><button id="btn-theme" onclick="toggleTheme()">浅色</button><button id="btn-lock" onclick="lockConsole()">锁定</button></span></div>
+<div id="statusbar" aria-label="实时状态"><span><span class="dot" id="sb-dot"></span><span class="vh" id="sb-dot-txt">正常</span>出口 <b id="sb-exit">—</b></span><span>节点 <b id="sb-node">—</b></span><span class="sp"></span><span>↓ <b id="rate-dn">—</b> Mb/s</span><span>↑ <b id="rate-up">—</b> Mb/s</span></div>
+<div id="login-gate"><div class="login-card glass-card"><div class="logo">vpngate</div><div class="sub">输入 Railway 环境变量 ADMIN_TOKEN（部署页 Variables 中查看）</div><div style="display:flex;gap:8px;margin-bottom:14px"><input id="login-token" type="password" autocomplete="off" aria-label="ADMIN_TOKEN" aria-describedby="login-err" placeholder="ADMIN_TOKEN" style="margin-bottom:0;flex:1" onkeydown="if(event.key==='Enter')loginEnter()"><button id="btn-show-token" class="btn" style="padding:12px 14px;font-size:13px;white-space:nowrap" aria-pressed="false" onclick="toggleToken()">显示</button></div><button id="btn-login" onclick="loginEnter()">进入控制台</button><button id="btn-theme-gate" class="btn" style="width:100%;margin-top:10px;padding:10px;font-size:13px" onclick="toggleTheme()">浅色</button><p id="login-err" role="alert"></p></div></div>
 <div class="wrap" id="console" style="display:none">
 <section id="sec-overview" aria-label="总览">
 <div id="exit-card" class="glass-card">
 <div id="hero-kicker">—<br>—</div>
-<p id="hero-sub">loading…</p>
+<p id="hero-sub">加载中…</p>
 <p id="verify-result" aria-live="polite"></p>
 <p id="switch-undo" hidden>已从 <b id="undo-from"></b> 切换到 <b id="undo-to"></b> · <button id="undo-link" class="opbtn" onclick="onUndo()">撤销换回</button></p>
 <div class="route-strip" id="route-strip" hidden>
@@ -317,12 +330,12 @@ html[data-theme="light"] :focus-visible{outline-color:#1a73e8}
 <div class="stat"><div class="k">最优实测</div><div class="v" id="stat-best">—</div></div>
 <div class="stat"><div class="k">运行时间</div><div class="v" id="stat-uptime">—</div></div>
 <div class="stat"><div class="k">累计流量 ↓/↑</div><div class="v num" style="font-size:17px;padding-top:7px"><span id="stat-down">—</span> / <span id="stat-up">—</span></div></div>
-<div class="stat"><div class="k">刷新成功/失败</div><div class="v" id="stat-refresh">—</div></div>
+<div class="stat"><div class="k">刷新成功/失败 <span id="stat-err" class="errchip" hidden></span></div><div class="v" id="stat-refresh">—</div></div>
 </div>
 <div class="glass-card" id="rate-card" hidden>
 <h2>实时速率</h2>
 <p class="desc">由 traffic 计数器差分绘制，console 可见时每轮更新。</p>
-<canvas id="spark" width="1000" height="64" aria-label="速率曲线"></canvas>
+<canvas id="spark" width="1000" height="64" role="img" aria-label="速率曲线"></canvas><p id="spark-alt" class="vh" role="status"></p>
 <div class="rate-legend"><span><i style="background:#6ee7b7"></i>下行</span><span><i style="background:#7dd3fc"></i>上行</span></div>
 </div>
 </section>
@@ -334,23 +347,25 @@ html[data-theme="light"] :focus-visible{outline-color:#1a73e8}
 <select id="scope" aria-label="范围"><option value="">全部国家</option></select>
 <div id="thinbar" aria-hidden="true"><i></i></div><div id="probe-progress"><div class="bar"><div class="fill" id="probe-fill" role="progressbar" aria-label="全量真测进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div></div><div class="txt" id="probe-txt"></div></div>
 <div id="empty-note" class="empty" hidden></div>
-<div id="bench-wrap"><table class="bench" aria-label="可用节点"><thead><tr><th class="sortable" scope="col"><button class="thsort" data-k="server" data-label="出口 IP">出口 IP</button></th><th class="sortable" scope="col"><button class="thsort" data-k="country" data-label="国家">国家</button></th><th class="sortable" scope="col"><button class="thsort" data-k="hand" data-label="握手">握手</button></th><th class="sortable" scope="col"><button class="thsort" data-k="real" data-label="实测">实测</button></th><th class="sortable" scope="col"><button class="thsort" data-k="alive" data-label="存活">存活</button></th><th scope="col">操作</th></tr></thead><tbody id="bench-body"></tbody></table></div>
+<p id="load-note" class="vh" role="status" hidden>加载中…</p><div id="bench-wrap"><table class="bench" aria-label="可用节点"><thead><tr><th class="sortable" scope="col"><button class="thsort" data-k="server" data-label="出口 IP">出口 IP</button></th><th class="sortable" scope="col"><button class="thsort" data-k="country" data-label="国家">国家</button></th><th class="sortable" scope="col"><button class="thsort" data-k="hand" data-label="握手">握手</button></th><th class="sortable" scope="col"><button class="thsort" data-k="real" data-label="实测">实测</button></th><th class="sortable" scope="col"><button class="thsort" data-k="alive" data-label="存活">存活</button></th><th scope="col">操作</th></tr></thead><tbody id="bench-body"></tbody></table></div>
 </div>
 </section>
 <section id="sec-logs" aria-label="日志">
 <div class="glass-card">
 <h2>日志</h2>
 <p class="desc">sing-box 最近输出，排查拨号失败时看这里。</p>
-<div style="display:flex;gap:10px;align-items:center;margin-bottom:12px"><select id="loglevel" aria-label="级别"><option value="">全部级别</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select><button class="btn" style="padding:7px 18px;font-size:12.5px" id="btn-logrefresh" onclick="refreshLogs(this)">刷新</button></div>
-<div id="logbox" role="log" aria-label="服务日志"><div style="color:#8b91a5">loading…</div></div>
+<div class="logtools"><input id="log-search" placeholder="搜索日志…" aria-label="搜索日志" oninput="renderLogs()"><select id="loglevel" aria-label="级别" title="error≈fail·refus·denied·exception；warn≈timeout·retry；ok≈verify·switch·refresh"><option value="">全部级别</option><option value="info">info</option><option value="warn">warn</option><option value="error">error</option></select><label class="chk"><input type="checkbox" id="log-auto" checked onchange="renderLogs()"> 自动滚动</label><button class="btn" style="padding:7px 18px;font-size:12.5px" id="btn-logrefresh" onclick="refreshLogs(this)">刷新</button></div>
+<div id="logbox" role="log" aria-label="服务日志"><div style="color:#8b91a5">加载中…</div></div>
 </div>
 </section>
 <section id="sec-sub" aria-label="订阅" hidden>
 <div class="glass-card">
 <h2>订阅</h2>
 <p class="desc">双路 VLESS，一键复制。域名取当前访问 host。</p>
-<div class="subrow"><code id="sub-direct">—</code><button class="btn" onclick="copySub('direct',this)">复制</button></div>
-<div class="subrow"><code id="sub-chain">—</code><button class="btn" onclick="copySub('chain',this)">复制</button></div>
+<div class="subrow"><span class="subtag">直连 /ws-node（VPN 故障时可用）</span><code id="sub-direct">—</code><button class="btn" onclick="copySub('direct',this)">复制</button></div>
+<div class="subrow"><span class="subtag">经 VPN /ws-chain（跟随当前出口）</span><code id="sub-chain">—</code><button class="btn" onclick="copySub('chain',this)">复制</button></div>
+<p class="hostnote" id="sub-host"></p>
+<div class="actions" style="margin-top:4px"><button class="btn" id="btn-copy-all" style="padding:7px 18px;font-size:12.5px" onclick="copyAll(this)">复制全部</button></div>
 </div>
 </section>
 <section id="sec-hist" aria-label="事件">
@@ -363,7 +378,7 @@ html[data-theme="light"] :focus-visible{outline-color:#1a73e8}
 </section>
 <div class="footer"><span id="foot-cpu" class="num">CPU —</span> · <span id="foot-mem" class="num">MEM —</span></div>
 </div>
-<div id="toast" role="status" aria-live="polite"></div>
+<div id="toast" role="status" aria-live="polite"></div><div id="alerts" role="alert" aria-live="assertive"></div>
 <script>
 var activeCountry = "";
 var lastStatus = null;
@@ -438,15 +453,14 @@ async function silentLogin() {
   }
 }
 function toast(msg, isErr) {
-  const box = document.getElementById("toast");
+  const box = document.getElementById(isErr ? "alerts" : "toast") || document.getElementById("toast");
   if ([...box.children].some(c => c.textContent === msg)) return;
   while (box.children.length >= 3) box.firstChild.remove();
   const el = document.createElement("div");
   el.className = "toast-msg" + (isErr ? " err" : "");
-  if (isErr) el.setAttribute("role", "alert");
   el.textContent = msg;
   box.appendChild(el);
-  setTimeout(() => el.remove(), 4500);
+  setTimeout(() => el.remove(), isErr ? 6000 : 4500);
 }
 function setBusy(id, busy, busyText) {
   const el = document.getElementById(id);
@@ -466,7 +480,12 @@ async function api(path, method, body, signal) {
   const r = await fetch(path, {method: method || "GET", headers: authHeaders(),
     body: body ? JSON.stringify(body) : undefined, signal: signal || undefined});
   if (r.status === 401) throw new Error("unauthorized: save ADMIN_TOKEN first");
-  if (!r.ok) throw new Error("HTTP " + r.status + ": " + (await r.text()).slice(0, 160));
+  if (!r.ok) {
+    const raw = (await r.text()).slice(0, 160);
+    let detail = raw;
+    try { detail = JSON.parse(raw).detail || raw; } catch (_e) {}
+    throw new Error("HTTP " + r.status + ": " + detail);
+  }
   return r.json();
 }
 function isAbort(e) { return !!e && e.name === "AbortError"; }
@@ -480,6 +499,12 @@ function latBar(v) {
   return '<span class="lat"><span class="bar"><i style="width:' + w + '%;background:currentColor" class="' + latCls(v) + '"></i></span><span class="' + latCls(v) + '">' + v + 'ms</span></span>';
 }
 function fmtGB(v) { return v == null ? "—" : (v / 1e9).toFixed(1) + " GB"; }
+function fmtDur(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  if (sec < 3600) return Math.floor(sec / 60) + "m";
+  if (sec < 172800) return Math.floor(sec / 3600) + "h" + Math.floor(sec % 3600 / 60) + "m";
+  return Math.floor(sec / 86400) + "d" + Math.floor(sec % 86400 / 3600) + "h";
+}
 function nodeQuery() { const el = document.getElementById("node-search"); return el ? el.value.trim().toLowerCase() : ""; }
 function sortVal(e) {
   if (sortKey === "country") return (e.country || "") + (e.tag || "");
@@ -518,7 +543,7 @@ async function refresh() {
   } catch (e) {
     if (isAbort(e)) return;
     if (/401|unauthorized/.test(e.message || "")) { backToLogin("登录已失效，请重新输入 token"); return; }
-    document.getElementById("hero-sub").textContent = "status fetch failed: " + e.message;
+    document.getElementById("hero-sub").textContent = "状态拉取失败：" + e.message;
     toast("状态拉取失败: " + e.message, true);
   }
 }
@@ -551,8 +576,13 @@ function renderAll(s) {
     document.getElementById("stat-nodes").textContent = s.endpoints.length;
     const measured = s.endpoints.filter(e => e.real_latency_ms != null).map(e => e.real_latency_ms);
     document.getElementById("stat-best").textContent = measured.length ? Math.min.apply(null, measured) + "ms" : "—";
-    document.getElementById("stat-uptime").textContent = Math.floor((s.uptime_seconds || 0) / 60) + "m";
+    document.getElementById("stat-uptime").textContent = fmtDur(s.uptime_seconds || 0);
     document.getElementById("stat-refresh").textContent = s.refresh_ok + "/" + s.refresh_fail;
+    const errChip = document.getElementById("stat-err");
+    if (errChip) {
+      if (s.last_error) { errChip.hidden = false; errChip.textContent = String(s.last_error).slice(0, 18); errChip.title = String(s.last_error); }
+      else errChip.hidden = true;
+    }
     const byCountry = {};
     s.endpoints.forEach(e => { byCountry[e.country_short] = (byCountry[e.country_short] || 0) + 1; });
     const scopeSel = document.getElementById("scope");
@@ -579,7 +609,7 @@ function renderAll(s) {
       const unmeasured = e.real_latency_ms == null;
       const unm = (!isPinned && !isPending && unmeasured) ? '<span class="badge unmeasured">未测通</span>' : "";
       const disSw = unmeasured ? " aria-disabled='true' title='先测速再切换：该节点还未测通'" : "";
-      const disPb = (e.tag === probingTag) ? " aria-disabled='true' disabled" : "";
+      const disPb = (e.tag === probingTag) ? " disabled title='测速中，请稍候'" : "";
       return "<tr class='" + (isPinned ? "pinned" : "") + (isPending ? " pending" : "") + "'><td class='hl'><span class='ip'>" + esc(e.server || e.tag) + "</span>" + pinned + pending + probing + unm + "</td><td><span class='cc'>" + esc(e.country_short) + "</span>" + esc(e.country) + "</td><td class='hl'>" + fmtMs(e.latency_ms) +
       "</td><td class='hl'>" + latBar(e.real_latency_ms) + "</td><td>" + (e.alive_seconds || 0) + "s</td>" +
       "<td class='op'><button class='opbtn' data-probe='" + t + "' aria-label='单测 " + esc(e.server || e.tag) + "'" + disPb + ">测速</button><button class='opbtn' data-switch='" + t + "' aria-label='切换到 " + esc(e.server || e.tag) + "'" + disSw + ">切换</button></td></tr>";
@@ -587,6 +617,8 @@ function renderAll(s) {
     document.getElementById("bench-body").innerHTML = rows ||
       '<tr><td colspan="6"><div class="empty">无匹配节点，换个关键词或 <a class="linklike" onclick="clearFilter()">清除筛选</a></div></td></tr>';
     document.getElementById("node-count").textContent = eps.length + " / " + s.endpoints.length;
+    const loadNote = document.getElementById("load-note");
+    if (loadNote) loadNote.hidden = true;
     const emptyNote = document.getElementById("empty-note");
     if (emptyNote) {
       const filtering = activeCountry || nodeQuery();
@@ -604,8 +636,8 @@ function renderAll(s) {
     syncSortHeaders();
     renderProbeProgress(s.full_probe);
     document.getElementById("history-line").textContent =
-      "refresh ok/fail: " + s.refresh_ok + "/" + s.refresh_fail + " · uptime: " + s.uptime_seconds + "s · error: " + (s.last_error || "—");
-    const hist = (s.refresh_history || []).slice().reverse().slice(0, 12);
+      "刷新成功/失败：" + s.refresh_ok + "/" + s.refresh_fail + " · 运行：" + fmtDur(s.uptime_seconds || 0) + " · 错误：" + (s.last_error || "—");
+    const hist = (s.refresh_history || []).slice().reverse().slice(0, 20);
     document.getElementById("history-list").innerHTML = hist.length ?
       hist.map(h => "<li><b>" + esc(h.event) + "</b> " + esc(h.detail || "") + " · " + esc(h.ts || "") + "</li>").join("") :
       '<li style="color:#8b91a5">暂无事件</li>';
@@ -622,7 +654,7 @@ function renderAll(s) {
     }
   } catch (e) {
     if (isAbort(e)) return;
-    document.getElementById("hero-sub").textContent = "status fetch failed: " + e.message;
+    document.getElementById("hero-sub").textContent = "状态拉取失败：" + e.message;
     toast("状态拉取失败: " + e.message, true);
   }
 }
@@ -640,12 +672,14 @@ function renderStatusbar(s, pref) {
     const verified = !!(s.verify && s.verify.exit_ip);
     dot.className = "dot " + (age > 45 ? "err" : ((!verified || age > 30) ? "stale" : ""));
     dot.title = "上次更新" + (age > 1e8 ? "—" : age + "s前") + " · 自动刷新每15s";
+    const dtxt = document.getElementById("sb-dot-txt");
+    if (dtxt) dtxt.textContent = age > 45 ? "刷新失败" : ((!verified || age > 30) ? "未验证或数据较旧" : "正常");
   }
 }
 function renderTraffic(s) {
   const t = s.traffic || {};
-  document.getElementById("stat-down").textContent = fmtGB(t.bytes_down).replace(" GB", "");
-  document.getElementById("stat-up").textContent = fmtGB(t.bytes_up).replace(" GB", "");
+  document.getElementById("stat-down").textContent = fmtGB(t.bytes_down);
+  document.getElementById("stat-up").textContent = fmtGB(t.bytes_up);
   const now = Date.now();
   if (lastBytes && now > lastBytes.at) {
     const dt = (now - lastBytes.at) / 1000;
@@ -653,6 +687,8 @@ function renderTraffic(s) {
     const up = Math.max(0, (t.bytes_up - lastBytes.up) * 8 / dt / 1e6);
     document.getElementById("rate-dn").textContent = dn.toFixed(2);
     document.getElementById("rate-up").textContent = up.toFixed(2);
+    const alt = document.getElementById("spark-alt");
+    if (alt) alt.textContent = "下行最新 " + dn.toFixed(2) + " Mb/s，上行 " + up.toFixed(2) + " Mb/s";
     rateHist.dn.push(dn); rateHist.up.push(up);
     if (rateHist.dn.length > 60) { rateHist.dn.shift(); rateHist.up.shift(); }
     document.getElementById("rate-card").hidden = false;
@@ -685,18 +721,43 @@ function renderRoutes(s) {
 function renderSub(s) {
   const sec = document.getElementById("sec-sub");
   if (!sec) return;
-  if (!s.vless) { sec.hidden = true; return; }
+  const nav = document.getElementById("nav-sub");
+  if (!s.vless) { sec.hidden = true; if (nav) nav.style.display = "none"; return; }
   sec.hidden = false;
+  if (nav) nav.style.display = "";
   const host = location.hostname, uuid = s.vless.uuid;
   const mk = (path, label) => "vless://" + uuid + "@" + host + ":443?security=tls&sni=" + host + "&type=ws&path=" + path + "#" + label;
   sec.dataset.direct = mk(s.vless.direct_path, "direct");
   sec.dataset.chain = mk(s.vless.chain_path, "vpngate");
   document.getElementById("sub-direct").textContent = sec.dataset.direct;
   document.getElementById("sub-chain").textContent = sec.dataset.chain;
+  const hostNote = document.getElementById("sub-host");
+  if (hostNote) hostNote.textContent = "当前 host=" + host + " · 换域名访问会改变链接";
 }
 async function copySub(which, btn) {
   const sec = document.getElementById("sec-sub");
   const text = which === "direct" ? sec.dataset.direct : sec.dataset.chain;
+  if (!text) return;
+  let ok = false;
+  try {
+    await navigator.clipboard.writeText(text);
+    ok = true;
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = text; document.body.appendChild(ta); ta.select();
+    try { ok = document.execCommand("copy"); } catch (_e) {}
+    ta.remove();
+  }
+  if (!ok) { toast("复制失败，请手动复制", true); return; }
+  if (btn) {
+    const old = btn.textContent;
+    btn.textContent = "已复制 ✓";
+    setTimeout(() => { btn.textContent = old; }, 1500);
+  }
+}
+async function copyAll(btn) {
+  const sec = document.getElementById("sec-sub");
+  const text = [sec.dataset.direct, sec.dataset.chain].filter(Boolean).join("\n");
   if (!text) return;
   let ok = false;
   try {
@@ -734,10 +795,12 @@ function renderLogs() {
   const box = document.getElementById("logbox");
   if (!box) return;
   const lv = (document.getElementById("loglevel") || {}).value || "";
-  const rows = lastLogLines.filter(l => !lv || logLevel(l) === lv);
+  const q = ((document.getElementById("log-search") || {}).value || "").trim().toLowerCase();
+  const rows = lastLogLines.filter(l => (!lv || logLevel(l) === lv) && (!q || l.toLowerCase().includes(q)));
   box.innerHTML = rows.length ? rows.map(l => '<div><span class="' + logLevel(l) + '">' + esc(l.slice(0, 300)) + "</span></div>").join("")
     : '<div style="color:#8b91a5">暂无日志</div>';
-  box.scrollTop = box.scrollHeight;
+  const auto = document.getElementById("log-auto");
+  if (!auto || auto.checked) box.scrollTop = box.scrollHeight;
 }
 function toggleTheme() {
   const cur = document.documentElement.dataset.theme === "light" ? "dark" : "light";
@@ -746,13 +809,24 @@ function toggleTheme() {
   syncThemeLabel();
 }
 function syncThemeLabel() {
-  const btn = document.getElementById("btn-theme");
-  if (btn) btn.textContent = document.documentElement.dataset.theme === "light" ? "深色" : "浅色";
+  const light = document.documentElement.dataset.theme === "light";
+  document.querySelectorAll("#btn-theme,#btn-theme-gate").forEach((b) => { b.textContent = light ? "切换到深色" : "切换到浅色"; });
+}
+function toggleToken() {
+  const input = document.getElementById("login-token");
+  const btn = document.getElementById("btn-show-token");
+  if (!input || !btn) return;
+  const show = input.type !== "text";
+  input.type = show ? "text" : "password";
+  btn.textContent = show ? "隐藏" : "显示";
+  btn.setAttribute("aria-pressed", show ? "true" : "false");
 }
 function skeletonRows() {
   let s = "";
-  for (let i = 0; i < 5; i++) s += '<tr class="skel"><td><div class="sk" style="width:60%"></div></td><td><div class="sk" style="width:40%"></div></td><td><div class="sk" style="width:50%"></div></td><td><div class="sk" style="width:70%"></div></td><td><div class="sk" style="width:30%"></div></td><td><div class="sk" style="width:70%"></div></td></tr>';
+  for (let i = 0; i < 5; i++) s += "<tr class='skel' aria-hidden='true'><td><div class='sk' style='width:60%'></div></td><td><div class='sk' style='width:40%'></div></td><td><div class='sk' style='width:50%'></div></td><td><div class='sk' style='width:70%'></div></td><td><div class='sk' style='width:30%'></div></td><td><div class='sk' style='width:70%'></div></td></tr>";
   document.getElementById("bench-body").innerHTML = s;
+  const note = document.getElementById("load-note");
+  if (note) note.hidden = false;
 }
 function renderVerify(v, pref) {
   const el = document.getElementById("verify-result");
@@ -1036,6 +1110,10 @@ setInterval(() => {
   if (document.hidden) return;
   if (document.querySelector(".btn.busy")) return;
   refresh();
+  const auto = document.getElementById("log-auto");
+  const lv = document.getElementById("loglevel");
+  const qs = document.getElementById("log-search");
+  if (auto && auto.checked && lv && !lv.value && qs && !qs.value.trim()) refreshLogs(null);
 }, 15000);
 </script>
 </body></html>
