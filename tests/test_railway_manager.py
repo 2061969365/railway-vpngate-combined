@@ -3451,7 +3451,9 @@ class PinStateTests(unittest.TestCase):
                     self.assertTrue(manager.refresh_once(
                         fetcher=lambda url, timeout: _snapshot_csv(
                             "203.0.113.11", "203.0.113.12")))
-                with _fake_singbox():
+                    # The auto full probe triggered by refresh runs in a
+                    # background thread; join it inside the fake-singbox
+                    # scope so its _apply_config sees the mocked check.
                     manager._full_probe_thread.join(timeout=60)
             finally:
                 manager.stop()
