@@ -57,6 +57,30 @@ STALE_RUNNING_AFTER = 180.0
 HEALTH_CHECK_INTERVAL = 20
 PINNED_FAIL_THRESHOLD = 3
 SUPERVISE_INTERVAL = 10
+# Runtime-tunable settings (console /api/settings; settings.json overrides
+# env on boot). Bounds are enforced on POST; out-of-range is a 400.
+SETTINGS_SPEC: dict = {
+    "refresh_seconds": {"type": "int", "min": 300, "max": 86400},
+    "dial_timeout": {"type": "int", "min": 5, "max": 90},
+    "real_topk": {"type": "int", "min": 0, "max": 50},
+    "dial_workers": {"type": "int", "min": 1, "max": 10},
+    "full_probe_workers": {"type": "int", "min": 1, "max": 10},
+    "probe_workers": {"type": "int", "min": 5, "max": 50},
+    "auto_repin": {"type": "bool"},
+    "auto_rescue": {"type": "bool"},
+}
+
+
+def _env_bool(env: dict, name: str, default: bool) -> bool:
+    raw = env.get(name)
+    if raw is None:
+        return default
+    text = str(raw).strip().lower()
+    if text in ("1", "true", "yes", "on"):
+        return True
+    if text in ("0", "false", "no", "off"):
+        return False
+    return default
 # probe_pool=0 everywhere: every refresh (boot included) discovers all
 # handshake-alive nodes; only the expensive real tunnel dial is TopK
 # (REAL_TOPK). Truncating boot discovery to the first Speed chunk used to
@@ -200,6 +224,12 @@ section{scroll-margin-top:130px}
 .hostnote{font-size:12px;color:#8b91a5;margin-top:10px}
 .logtools{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
 .logtools .chk{font-size:12.5px;color:#a8adbd;display:flex;gap:6px;align-items:center;cursor:pointer;white-space:nowrap}
+.setgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:4px}
+.setgrid label{font-size:12.5px;color:#a8adbd;display:flex;flex-direction:column;gap:6px}
+.setgrid label.chk{flex-direction:row;align-items:center;gap:8px;cursor:pointer;min-height:28px}
+.setgrid input[type="number"]{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);color:#fff;border-radius:10px;padding:8px 12px;font-size:13px;width:100%}
+.setgrid input[type="checkbox"]{width:16px;height:16px;accent-color:#0ea5e9}
+#settings-result{margin-top:10px;font-size:13px;color:#6ee7b7;min-height:20px}
 #log-search{width:180px}
 table.bench th.sortable{cursor:pointer;user-select:none}
 table.bench th.sortable:hover{color:#fff}
@@ -304,6 +334,9 @@ html[data-theme="light"] #login-err{color:#d93025}
 html[data-theme="light"] .errchip{background:#fef7e0;color:#7A4A00;border-color:#fde293}
 html[data-theme="light"] .subtag{background:#f1f3f4;border-color:#dadce0;color:#5f6368}
 html[data-theme="light"] .hostnote,html[data-theme="light"] .logtools .chk{color:#5f6368}
+html[data-theme="light"] .setgrid label{color:#5f6368}
+html[data-theme="light"] .setgrid input[type="number"]{background:#fff;border-color:#dadce0;color:#202124}
+html[data-theme="light"] #settings-result{color:#188038}
 html[data-theme="light"] .toast-msg{background:#fff;color:#3c4043;border-color:#dadce0}
 html[data-theme="light"] .toast-msg.err{background:#fff;color:#d93025;border-color:#d93025}
 html[data-theme="light"] :focus-visible{outline-color:#1a73e8}
@@ -311,7 +344,7 @@ html[data-theme="light"] :focus-visible{outline-color:#1a73e8}
 
 </style></head>
 <body>
-<div id="topnav"><span class="logo">vpngate</span><span class="live" title="自动刷新每15秒">● <span lang="en">LIVE</span></span><span class="links"><a href="#sec-overview">总览</a><a href="#sec-nodes">节点</a><a href="#sec-logs">日志</a><a href="#sec-sub" id="nav-sub">订阅</a><a href="#sec-hist">事件</a></span><span class="right"><button id="btn-theme" onclick="toggleTheme()">浅色</button><button id="btn-lock" onclick="lockConsole()">锁定</button></span></div>
+<div id="topnav"><span class="logo">vpngate</span><span class="live" title="自动刷新每15秒">● <span lang="en">LIVE</span></span><span class="links"><a href="#sec-overview">总览</a><a href="#sec-nodes">节点</a><a href="#sec-logs">日志</a><a href="#sec-sub" id="nav-sub">订阅</a><a href="#sec-hist">事件</a><a href="#sec-settings">设置</a></span><span class="right"><button id="btn-theme" onclick="toggleTheme()">浅色</button><button id="btn-lock" onclick="lockConsole()">锁定</button></span></div>
 <div id="statusbar" aria-label="实时状态"><span><span class="dot" id="sb-dot"></span><span class="vh" id="sb-dot-txt">正常</span>出口 <b id="sb-exit">—</b></span><span>节点 <b id="sb-node">—</b></span><span class="sp"></span><span>↓ <b id="rate-dn">—</b> Mb/s</span><span>↑ <b id="rate-up">—</b> Mb/s</span></div>
 <div id="login-gate"><div class="login-card glass-card"><div class="logo">vpngate</div><div class="sub">输入 Railway 环境变量 ADMIN_TOKEN（部署页 Variables 中查看）</div><div style="display:flex;gap:8px;margin-bottom:14px"><input id="login-token" type="password" autocomplete="off" aria-label="ADMIN_TOKEN" aria-describedby="login-err" placeholder="ADMIN_TOKEN" style="margin-bottom:0;flex:1" onkeydown="if(event.key==='Enter')loginEnter()"><button id="btn-show-token" class="btn" style="padding:12px 14px;font-size:13px;white-space:nowrap" aria-pressed="false" onclick="toggleToken()">显示</button></div><button id="btn-login" onclick="loginEnter()">进入控制台</button><button id="btn-theme-gate" class="btn" style="width:100%;margin-top:10px;padding:10px;font-size:13px" onclick="toggleTheme()">浅色</button><p id="login-err" role="alert"></p></div></div>
 <div class="wrap" id="console" style="display:none">
@@ -378,6 +411,24 @@ html[data-theme="light"] :focus-visible{outline-color:#1a73e8}
 <ul id="history-list"></ul>
 </div>
 </section>
+<section id="sec-settings" aria-label="设置">
+<div class="glass-card">
+<h2>设置</h2>
+<p class="desc">运行参数，保存后下轮生效（刷新间隔、全量并发等），重启不丢失。</p>
+<div class="setgrid">
+<label>刷新间隔秒<input id="set-refresh" type="number" aria-label="刷新间隔秒"></label>
+<label>真拨超时秒<input id="set-timeout" type="number" aria-label="真拨超时秒"></label>
+<label>TopK 真拨数<input id="set-topk" type="number" aria-label="TopK 真拨数"></label>
+<label>刷新真拨并发<input id="set-dialw" type="number" aria-label="刷新真拨并发"></label>
+<label>全量真测并发<input id="set-fpw" type="number" aria-label="全量真测并发"></label>
+<label>握手并发<input id="set-probew" type="number" aria-label="握手并发"></label>
+<label class="chk"><input type="checkbox" id="set-repin"> 每小时自动重 pin 最优</label>
+<label class="chk"><input type="checkbox" id="set-rescue"> 手动 pin 挂了自动救最优</label>
+</div>
+<div class="actions"><button id="btn-settings-save" class="btn" onclick="saveSettings()">保存设置</button></div>
+<p id="settings-result" aria-live="polite"></p>
+</div>
+</section>
 <div class="footer"><span id="foot-cpu" class="num">CPU —</span> · <span id="foot-mem" class="num">MEM —</span></div>
 </div>
 <div id="toast" role="status" aria-live="polite"></div><div id="alerts" role="alert" aria-live="assertive"></div>
@@ -396,6 +447,7 @@ function showConsole() {
   document.getElementById("console").style.display = "";
   refresh();
   refreshLogs(null);
+  loadSettings();
 }
 function backToLogin(msg) {
   probeSeq++; fullSeq++; verifySeq++;
@@ -791,6 +843,59 @@ async function refreshLogs(btn) {
   } catch (e) { if (!isAbort(e)) toast("日志拉取失败: " + e.message, true); }
   if (btn) { btn.disabled = false; }
 }
+function setVal(id, v) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (el.type === "checkbox") el.checked = !!v;
+  else el.value = v;
+}
+function getVal(id) {
+  const el = document.getElementById(id);
+  if (!el) return null;
+  if (el.type === "checkbox") return el.checked;
+  const n = parseInt(el.value, 10);
+  return isNaN(n) ? el.value : n;
+}
+async function loadSettings() {
+  try {
+    const r = await api("/api/settings");
+    const v = r.values || {};
+    setVal("set-refresh", v.refresh_seconds);
+    setVal("set-timeout", v.dial_timeout);
+    setVal("set-topk", v.real_topk);
+    setVal("set-dialw", v.dial_workers);
+    setVal("set-fpw", v.full_probe_workers);
+    setVal("set-probew", v.probe_workers);
+    setVal("set-repin", v.auto_repin);
+    setVal("set-rescue", v.auto_rescue);
+  } catch (e) { if (!isAbort(e)) toast("设置拉取失败: " + e.message, true); }
+}
+async function saveSettings() {
+  const btn = document.getElementById("btn-settings-save");
+  const note = document.getElementById("settings-result");
+  const payload = {
+    refresh_seconds: getVal("set-refresh"),
+    dial_timeout: getVal("set-timeout"),
+    real_topk: getVal("set-topk"),
+    dial_workers: getVal("set-dialw"),
+    full_probe_workers: getVal("set-fpw"),
+    probe_workers: getVal("set-probew"),
+    auto_repin: getVal("set-repin"),
+    auto_rescue: getVal("set-rescue")
+  };
+  if (btn) { btn.disabled = true; }
+  try {
+    await api("/api/settings", "POST", payload);
+    if (note) note.textContent = "已保存 · 下轮生效";
+    loadSettings();
+  } catch (e) {
+    if (!isAbort(e)) {
+      if (note) note.textContent = "";
+      toast("保存失败: " + e.message, true);
+    }
+  }
+  if (btn) { btn.disabled = false; }
+}
 function logLevel(line) {
   if (/error|fail|refus|denied|exception/i.test(line)) return "err";
   if (/warn|timeout|retry|invalid/i.test(line)) return "warn";
@@ -1079,7 +1184,7 @@ function syncSortHeaders() {
   });
 }
 document.getElementById("loglevel").addEventListener("change", renderLogs);
-const spySecs = ["sec-overview", "sec-nodes", "sec-logs", "sec-sub", "sec-hist"];
+const spySecs = ["sec-overview", "sec-nodes", "sec-logs", "sec-sub", "sec-hist", "sec-settings"];
 window.addEventListener("scroll", () => {
   let cur = spySecs[0];
   spySecs.forEach((id) => { const el = document.getElementById(id); if (el && el.getBoundingClientRect().top < 170) cur = id; });
@@ -1201,6 +1306,10 @@ def build_config_from_env(env: dict) -> dict:
         "real_topk": int(env.get("REAL_TOPK", "10")),
         "dial_workers": int(env.get("DIAL_WORKERS", "5")),
         "full_probe_workers": int(env.get("FULL_PROBE_WORKERS", "5")),
+        "probe_workers": int(env.get("PROBE_WORKERS", "20")),
+        "dial_timeout": int(env.get("DIAL_TIMEOUT", "20")),
+        "auto_repin": _env_bool(env, "AUTO_REPIN", True),
+        "auto_rescue": _env_bool(env, "AUTO_RESCUE", True),
         "health_check_interval": int(env.get("HEALTH_CHECK_INTERVAL", "20")),
         "max_mux_connections": int(env.get("MAX_MUX_CONNECTIONS", "100")),
         "data_dir": env.get("DATA_DIR")
@@ -1420,6 +1529,10 @@ class RailwayManager:
         dial_fn=None,
         dial_workers: int = 10,
         full_probe_workers: int = 5,
+        probe_workers: int = 20,
+        dial_timeout: int = 20,
+        auto_repin: bool = True,
+        auto_rescue: bool = True,
         verify_fn=None,
         vless_uuid: str = "",
         vless_direct_port: int = 8080,
@@ -1432,6 +1545,7 @@ class RailwayManager:
         config_path: str = "singbox-railway.json",
         nodes_path: str = "nodes.json",
         state_path: str = "state.json",
+        settings_path: str | None = None,
         singbox_bin: str = "sing-box",
         start_singbox: bool = True,
         auto_refresh: bool = True,
@@ -1453,15 +1567,22 @@ class RailwayManager:
         self.real_topk = real_topk
         self.dial_fn = (dial_fn if dial_fn is not None else
                         (lambda node: measure_real_latency(
-                            node["endpoint"], self.singbox_bin)))
+                            node["endpoint"], self.singbox_bin,
+                            self.dial_timeout)))
         self.dial_workers = dial_workers
         self.full_probe_workers = max(1, full_probe_workers)
+        self.probe_workers = probe_workers
+        self.dial_timeout = dial_timeout
+        self.auto_repin = auto_repin
+        self.auto_rescue = auto_rescue
         self.verify_fn = (verify_fn if verify_fn is not None else
                           (lambda endpoint: measure_exit_ip(
-                              endpoint, self.singbox_bin)))
+                              endpoint, self.singbox_bin,
+                              self.dial_timeout)))
         self.config_path = config_path
         self.nodes_path = nodes_path
         self.state_path = state_path
+        self.settings_path = settings_path
         self.last_good_path = f"{config_path}.last-good"
         self.singbox_bin = singbox_bin
         self.want_singbox = start_singbox
@@ -1526,6 +1647,8 @@ class RailwayManager:
         self._singbox_proc: subprocess.Popen | None = None
         self._stderr_handle = None
         self.bound_port = port
+        # settings.json (console) overrides the env-derived defaults.
+        self.load_settings()
 
     # -- lifecycle ------------------------------------------------------
     def start(self) -> int:
@@ -1723,6 +1846,9 @@ class RailwayManager:
                 "200 OK", "application/json",
                 json.dumps({"limit": limit,
                             "lines": tail.splitlines() if tail else []}).encode()))
+        elif path == "/api/settings" and method == "GET":
+            client.sendall(_http_response("200 OK", "application/json",
+                                          json.dumps(self.settings_snapshot()).encode()))
         elif method == "POST":
             # Expensive endpoints share a small slot pool so a burst of
             # refresh/probe/verify POSTs can't exhaust the box. Cheap GETs
@@ -1824,6 +1950,23 @@ class RailwayManager:
                 status, "application/json",
                 json.dumps({"ok": ok, "preferred_tag": self.preferred_tag,
                             "detail": detail}).encode()))
+        elif path == "/api/settings":
+            try:
+                payload = json.loads((body or b"{}").decode("utf-8") or "{}")
+            except (ValueError, UnicodeDecodeError):
+                payload = None
+            if not isinstance(payload, dict):
+                client.sendall(_http_response("400 Bad Request", "text/plain",
+                                              b"invalid json"))
+                return
+            ok, detail = self.update_settings(payload)
+            status = "200 OK" if ok else "400 Bad Request"
+            client.sendall(_http_response(
+                status, "application/json",
+                json.dumps({"ok": ok,
+                            "detail": detail,
+                            "settings": self.settings_snapshot()["values"] if ok
+                            else None}).encode()))
         elif path.startswith("/api/"):
             client.sendall(_http_response("405 Method Not Allowed", "text/plain",
                                           b"method not allowed"))
@@ -1936,6 +2079,75 @@ class RailwayManager:
         _write_private_json(self.state_path, {"preferred_tag": self.preferred_tag,
                                               "backup_tag": self.backup_tag,
                                               "auto_pinned": self._auto_pinned})
+
+    @staticmethod
+    def _coerce_setting(key: str, value) -> tuple[bool, object, str]:
+        """Validate one settings value. Returns (ok, clean, error)."""
+        spec = SETTINGS_SPEC.get(key)
+        if spec is None:
+            return False, None, f"unknown setting {key}"
+        if spec["type"] == "bool":
+            if isinstance(value, bool):
+                return True, value, ""
+            if isinstance(value, (int, float)) and value in (0, 1):
+                return True, bool(value), ""
+            if isinstance(value, str) and value.strip().lower() in (
+                    "1", "true", "yes", "on"):
+                return True, True, ""
+            if isinstance(value, str) and value.strip().lower() in (
+                    "0", "false", "no", "off"):
+                return True, False, ""
+            return False, None, f"{key} must be a boolean"
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            return False, None, f"{key} must be an integer"
+        if isinstance(value, bool) or not spec["min"] <= number <= spec["max"]:
+            return False, None, (
+                f"{key} must be {spec['min']}..{spec['max']}")
+        return True, number, ""
+
+    def settings_snapshot(self) -> dict:
+        with self._lock:
+            values = {key: getattr(self, key) for key in SETTINGS_SPEC}
+        bounds = {key: {k: v for k, v in spec.items() if k != "type"}
+                  for key, spec in SETTINGS_SPEC.items()}
+        return {"values": values, "bounds": bounds}
+
+    def update_settings(self, payload: dict) -> tuple[bool, str]:
+        """Validate + apply runtime settings; persists to settings.json."""
+        if not isinstance(payload, dict) or not payload:
+            return False, "empty settings payload"
+        clean: dict = {}
+        for key, value in payload.items():
+            ok, parsed, error = self._coerce_setting(key, value)
+            if not ok:
+                return False, error
+            clean[key] = parsed
+        with self._lock:
+            for key, value in clean.items():
+                setattr(self, key, value)
+        if self.settings_path:
+            _write_private_json(self.settings_path, self.settings_snapshot()["values"])
+        self._record_history(
+            "settings", ", ".join(f"{k}={v}" for k, v in clean.items()))
+        return True, "saved"
+
+    def load_settings(self) -> None:
+        """Apply settings.json over the env-derived defaults (boot only)."""
+        if not self.settings_path:
+            return
+        try:
+            with open(self.settings_path, encoding="utf-8") as handle:
+                saved = json.load(handle)
+        except (OSError, ValueError):
+            return
+        if not isinstance(saved, dict):
+            return
+        for key, value in saved.items():
+            ok, parsed, _ = self._coerce_setting(key, value)
+            if ok:
+                setattr(self, key, parsed)
 
     def _persist_nodes(self) -> None:
         _write_private_json(self.nodes_path,
@@ -2098,13 +2310,15 @@ class RailwayManager:
             self._pinned_fail_streak += 1
             if self._pinned_fail_streak < PINNED_FAIL_THRESHOLD:
                 return "pinned"
+            rescue = self.auto_rescue
             measured = sorted(
                 (n for n in self._nodes
                  if n.get("real_latency_ms") is not None
                  and (n.get("endpoint") or {}).get("tag")
                  and (n.get("endpoint") or {}).get("tag") != tag),
                 key=lambda n: (n["real_latency_ms"],
-                               (n.get("endpoint") or {}).get("tag") or ""))
+                               (n.get("endpoint") or {}).get("tag") or "")) \
+                if rescue else []
             best = ((measured[0].get("endpoint") or {}).get("tag")
                     if measured else None)
             second = ((measured[1].get("endpoint") or {}).get("tag")
@@ -2289,8 +2503,10 @@ class RailwayManager:
             nodes = snapshot_to_nodes(csv_text, limit=self.limit,
                                       probe_pool=probe_pool,
                                        probe_fn=lambda h, p: probe_tcp_latency(h, p, 5),
+                                       probe_workers=self.probe_workers,
                                        real_topk=self.real_topk, dial_fn=self.dial_fn,
                                        dial_workers=self.dial_workers,
+                                       dial_timeout=self.dial_timeout,
                                        singbox_bin=self.singbox_bin)
             if not nodes:
                 return self._refresh_failed("no reachable nodes, kept previous")
@@ -2459,6 +2675,11 @@ class RailwayManager:
         if not measured:
             self._record_history("auto-pin-skipped", "nothing measured")
             return
+        with self._lock:
+            if not self.auto_repin:
+                self._record_history("auto-pin-skipped",
+                                     "auto re-pin disabled")
+                return
         best = (measured[0].get("endpoint") or {}).get("tag")
         second = ((measured[1].get("endpoint") or {}).get("tag")
                   if len(measured) > 1 else None)
@@ -2788,6 +3009,10 @@ def main() -> int:
         real_topk=cfg["real_topk"],
         dial_workers=cfg["dial_workers"],
         full_probe_workers=cfg["full_probe_workers"],
+        probe_workers=cfg["probe_workers"],
+        dial_timeout=cfg["dial_timeout"],
+        auto_repin=cfg["auto_repin"],
+        auto_rescue=cfg["auto_rescue"],
         health_check_interval=cfg["health_check_interval"],
         max_mux_connections=cfg["max_mux_connections"],
         vless_uuid=cfg["vless_uuid"],
@@ -2799,6 +3024,7 @@ def main() -> int:
         config_path=os.path.join(data_dir, "singbox-railway.json"),
         nodes_path=os.path.join(data_dir, "nodes.json"),
         state_path=os.path.join(data_dir, "state.json"),
+        settings_path=os.path.join(data_dir, "settings.json"),
     )
     stop_event = threading.Event()
 
