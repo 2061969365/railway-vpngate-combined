@@ -2280,13 +2280,15 @@ class RailwayManager:
             self._nodes = nodes
             endpoints = nodes_to_endpoints(nodes)
             endpoint_tags = {ep["tag"] for ep in endpoints}
-            if self.preferred_tag not in endpoint_tags:
-                if self.preferred_tag is not None:
-                    self._record_history("preferred-gone",
-                                         f"{self.preferred_tag} vanished, back to auto")
+            if (self.preferred_tag is not None
+                    and self.preferred_tag not in endpoint_tags):
+                self._record_history("preferred-gone",
+                                     f"{self.preferred_tag} vanished, back to auto")
                 self.preferred_tag = None
                 self.backup_tag = None
                 self._auto_pinned = True
+            elif self.preferred_tag is None:
+                self.backup_tag = None
             preferred = self.preferred_tag
             backup = (self.backup_tag if self.backup_tag in endpoint_tags
                       else None)
@@ -2378,7 +2380,7 @@ class RailwayManager:
             list(executor.map(_dial_one, ordered))
         with self._lock:
             self.status["full_probe"]["state"] = "done"
-            first_run = not self._auto_pinned and self.preferred_tag is None
+            first_run = self.preferred_tag is None
             self._sync_probe_results(nodes)
             if not first_run:
                 self._record_history(
@@ -2418,13 +2420,11 @@ class RailwayManager:
                        start_auto: bool, first_run: bool = True) -> None:
         """Pin best + backup after a full probe, with guards.
 
-        Skips when nothing measured, when the user pinned manually mid-run,
-        or when the run started pinned and the user has since switched.
-        Later cycles only refresh measurements (keep the live connection);
-        only the first completed run pins, so cold boot serves the measured
-        best instead of a blind first-finisher. Keeps the current pin on
-        ties or when it still measures best, so hourly cycles don't flap
-        the serving config.
+        Skips when nothing measured or when the user pinned manually
+        mid-run. Unpinned boxes (cold boot, post-unpin) pin the measured
+        best on the first completed run; later cycles only refresh
+        measurements so the live connection never flaps. Keeps the current
+        pin on ties or when it still measures best.
         """
         if not first_run:
             return
