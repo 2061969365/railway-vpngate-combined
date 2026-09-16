@@ -3467,6 +3467,10 @@ class PinStateTests(unittest.TestCase):
             finally:
                 reloaded.stop()
 
+        events = [e["event"] for e in manager.status["refresh_history"]]
+        self.assertNotIn("auto-pin-skipped", events,
+                         [e for e in manager.status["refresh_history"]
+                          if e["event"] == "auto-pin-skipped"])
         self.assertIsNotNone(preferred)
         self.assertEqual(manager.backup_tag, reloaded.backup_tag)
         self.assertTrue(reloaded._auto_pinned)
