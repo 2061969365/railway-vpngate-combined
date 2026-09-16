@@ -31,7 +31,7 @@ VPNGate 免费节点（sing-box `openvpn-client`，免 TUN/免特权）+ 双 VLE
        直接 `python railway_manager.py` 会无 VLESS）、`NEZHA_SERVER`/`NEZHA_KEY`、
        `LIMIT`（默认 0=全量）、`REAL_TOPK`（默认 10）、`DIAL_WORKERS`（默认 5，
        真测并发；1GB 内存够用，OOM 就往小调）、`FULL_PROBE_WORKERS`（默认 5，
-       全量真测并发；和 DIAL_WORKERS 叠加受全局 dial gate 上限 10 约束）、`HEALTH_CHECK_INTERVAL`（默认 20s）、`MAX_MUX_CONNECTIONS`（默认 100）、`NEZHA_URL`（可选）、`SNAPSHOT_URLS`（可选，逗号分隔的快照镜像，主源失败自动顺延）
+       全量真测并发；和 DIAL_WORKERS 叠加受全局 dial gate 上限 10 约束）、`REFRESH_SECONDS`（默认 3600，每小时拉新快照并自动全量真测）、`HEALTH_CHECK_INTERVAL`（默认 20s）、`MAX_MUX_CONNECTIONS`（默认 100）、`NEZHA_URL`（可选）、`SNAPSHOT_URLS`（可选，逗号分隔的快照镜像，主源失败自动顺延）
 3. 健康检查：`/` 路径填 `/healthz`（部署时需 200，冷启动靠 last-good 秒回）。
 4. 另加一个 TCP Proxy 指向内部 `3000` 端口（可选，给 SOCKS5 用）。
 5. 持久化（强烈建议）：service → Volumes → Add Volume，加完即可，
@@ -84,7 +84,7 @@ curl http://127.0.0.1:3000/healthz   # ok
 ```
 
 管理页：`http://127.0.0.1:3000/ui`（粘贴 ADMIN_TOKEN）。节点列表显示出口 IP（`tag` 只留在 API 参数里）；搜索框＋范围下拉＋排序同一行；右上可切 Google 白浅色主题；底部显示真机 CPU 型号与实时占用（`GET /api/status` 的 `cpu{model,cores,pct}`、`memory.pct`，Linux 下读 `/proc`，取不到为 `None`）。
-全量真测：管理页按钮或 `POST /api/full_probe`（需 `Authorization: Bearer`）。
+全量真测：管理页按钮或 `POST /api/full_probe`（需 `Authorization: Bearer`）。每次刷新成功（开机/每小时/手动）都会自动在后台全量真测，按握手延迟从小到大 5 并发拨号，超时 20 秒；第一个拨通的节点立刻建连 serving，不等跑完。跑完自动双 pin：实测最低为主、次低为保底（chain 出 `[best, second, auto]`），手切过的节点不覆盖、平局不跳。状态条节点 title 显示主备。
 单节点测速：节点列表每行“测速”按钮，或 `POST /api/probe {"tag":"vpngate-N"}`；
 测通的节点自动可切换（全部存活节点本就在 sing-box 配置里，无需重建）。切换即切即换，成功后总览出现 15 秒「撤销换回」按钮（键盘可达，过期焦点自动回到当前节点）；成功的操作只在行内确认，失败才右下角弹窗。表头按钮可键盘排序，状态条圆点三态（绿=已验证新鲜/黄=未验证或数据旧/红=刷新失败），token 失效自动回登录页，全量真测可中途取消并显示中文进度＋预计剩余时间。日志支持搜索＋自动滚动开关；订阅行标注直连/经 VPN 用途，切换失败提示取后端 detail；统计卡自适应列、流量带单位、时长人性化显示，移动端保留导航并冻结首末列。
 
