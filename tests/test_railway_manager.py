@@ -361,8 +361,7 @@ class RefreshTests(unittest.TestCase):
         _, kwargs = snapshot_mock.call_args
         self.assertEqual(30, kwargs.get("probe_pool"))
 
-    def test_initial_refresh_uses_bounded_pool_for_fast_cold_start(self) -> None:
-        from railway_manager import INITIAL_PROBE_POOL
+    def test_initial_refresh_discovers_all_nodes(self) -> None:
         manager = self._manager()
         try:
             with mock.patch.object(RailwayManager, "_boot_from_last_good",
@@ -374,7 +373,27 @@ class RefreshTests(unittest.TestCase):
             manager.stop()
 
         _, kwargs = refresh_mock.call_args
-        self.assertEqual(INITIAL_PROBE_POOL, kwargs.get("probe_pool"))
+        self.assertEqual(0, kwargs.get("probe_pool"))
+
+    def test_initial_refresh_loads_beyond_first_pool_chunk(self) -> None:
+        ips = [f"198.51.100.{i}" for i in range(1, 41)]
+        manager = self._manager(
+            fetcher=lambda url, timeout: _snapshot_csv(*ips))
+        try:
+            with mock.patch.object(RailwayManager, "_boot_from_last_good",
+                                   return_value=False), \
+                 mock.patch.object(RailwayManager, "_check_config",
+                                   return_value=True), \
+                 mock.patch("railway_manager.probe_tcp_latency",
+                            return_value=100):
+                manager._initial_refresh()
+            count = len(manager._nodes)
+            endpoint_count = len(manager.status["endpoints"])
+        finally:
+            manager.stop()
+
+        self.assertEqual(40, count)
+        self.assertEqual(40, endpoint_count)
 
 
 class FullProbeTests(unittest.TestCase):
