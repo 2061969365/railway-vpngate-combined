@@ -1,6 +1,8 @@
 """Tests for scripts/measure_dial_times.py (dial elapsed instrumentation)."""
 import importlib.util
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -123,6 +125,20 @@ class RunTests(unittest.TestCase):
                                   limit=12, singbox_bin="sing-box")
 
         self.assertEqual(1, code)
+
+
+class ScriptEntryTests(unittest.TestCase):
+    """The script must run as `python scripts/measure_dial_times.py`
+    (only scripts/ on sys.path), like the CI step invokes it."""
+
+    def test_help_works_from_repo_root(self) -> None:
+        repo = Path(__file__).resolve().parent.parent
+        proc = subprocess.run(
+            [sys.executable, "scripts/measure_dial_times.py", "--help"],
+            cwd=repo, capture_output=True, text=True, timeout=60)
+
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertIn("--csv", proc.stdout)
 
 
 if __name__ == "__main__":
