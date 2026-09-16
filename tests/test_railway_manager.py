@@ -3304,8 +3304,9 @@ class AutoPinTests(unittest.TestCase):
 
 
 class ProgressivePinTests(unittest.TestCase):
-    """The first measured node serves traffic immediately; the best wins
-    at completion."""
+    """No pin before the run completes: cold boot pins only after a full
+    measurement, so the first serving pin is the measured best, never a
+    blind first-finisher."""
 
     TOKEN = "test-admin-token-0123456789abcdef"
 
@@ -3364,16 +3365,46 @@ class ProgressivePinTests(unittest.TestCase):
                     time.sleep(0.05)
                 seen.add(manager.preferred_tag)
                 manager._full_probe_thread.join(timeout=30)
+                events = [e["event"]
+                          for e in manager.status["refresh_history"]]
         finally:
             manager.stop()
 
         self.assertIn("vpngate-2", [n["endpoint"]["tag"]
                                     for n in manager._nodes
                                     if n["real_latency_ms"] == 10])
-        self.assertTrue(seen - {None, "vpngate-2"},
-                        f"no progressive pin observed: {seen}")
+        self.assertEqual({None}, seen,
+                         f"pin happened before completion: {seen}")
+        self.assertNotIn("auto-pin-first", events)
         self.assertEqual("vpngate-2", manager.preferred_tag)
         self.assertEqual("vpngate-1", manager.backup_tag)
+
+    def test_later_cycles_only_measure(self) -> None:
+        def dial(node):
+            return {"203.0.113.11": 60, "203.0.113.12": 50}[node["server"]]
+
+        manager = self._manager(dial_fn=dial)
+        try:
+            manager._nodes = [
+                {"server": f"203.0.113.1{i}", "server_port": 443,
+                 "country": "Japan", "country_short": "JP",
+                 "latency_ms": 100 * i, "real_latency_ms": None,
+                 "speed": 1000,
+                 "endpoint": {"tag": f"vpngate-{i - 1}",
+                              "server": f"203.0.113.1{i}",
+                              "server_port": 443}}
+                for i in (1, 2)]
+            with _fake_singbox():
+                self._post(manager, "/api/full_probe")
+                manager._full_probe_thread.join(timeout=30)
+                auto_pin_calls = manager.preferred_tag
+                self._post(manager, "/api/full_probe")
+                manager._full_probe_thread.join(timeout=30)
+        finally:
+            manager.stop()
+
+        self.assertEqual("vpngate-1", auto_pin_calls)
+        self.assertEqual(auto_pin_calls, manager.preferred_tag)
 
 
 class PinStateTests(unittest.TestCase):
