@@ -627,6 +627,37 @@ jobs:
           docker exec combined-trial cat /app/singbox-railway.json > /tmp/trial-serving.json
           python scripts/verify_dualpin.py --status /tmp/trial-pin.json \
             --config /tmp/trial-serving.json --summary-file "$GITHUB_STEP_SUMMARY"
+      - name: Verify settings round-trip via container API
+        run: |
+          # GET defaults, POST a change, GET it back, POST the restore:
+          # proves /api/settings validates, applies and persists (settings.json).
+          AUTH="Authorization: Bearer trial-admin-token-0123456789"
+          curl -m 10 -s -H "$AUTH" http://127.0.0.1:3000/api/settings \
+            -o /tmp/settings-before.json
+          python3 - <<'EOF'
+          import json
+          before = json.load(open("/tmp/settings-before.json"))["values"]
+          assert before["refresh_seconds"] == 3600, before
+          assert before["dial_timeout"] == 20, before
+          assert before["auto_repin"] is True, before
+          print("settings defaults OK:", {k: before[k] for k in
+                ("refresh_seconds", "dial_timeout", "auto_repin")})
+          EOF
+          curl -m 10 -s -X POST -H "$AUTH" -d '{"refresh_seconds":1800}' \
+            http://127.0.0.1:3000/api/settings | grep -q '"ok": true' || {
+            echo "settings POST rejected"; exit 1; }
+          curl -m 10 -s -H "$AUTH" http://127.0.0.1:3000/api/settings \
+            | python3 -c "import json,sys; v=json.load(sys.stdin)['values']; assert v['refresh_seconds']==1800, v; print('settings apply OK: refresh_seconds=1800')"
+          docker exec combined-trial cat /app/settings.json | grep -q "1800" || {
+            echo "settings.json not persisted"; exit 1; }
+          echo "settings.json persistence OK"
+          curl -m 10 -s -X POST -H "$AUTH" -d '{"refresh_seconds":60}' \
+            http://127.0.0.1:3000/api/settings | grep -q '"ok": false' || {
+            echo "out-of-range settings POST should be rejected"; exit 1; }
+          echo "settings validation OK (60s rejected)"
+          curl -m 10 -s -X POST -H "$AUTH" -d '{"refresh_seconds":3600}' \
+            http://127.0.0.1:3000/api/settings | grep -q '"ok": true'
+          echo "settings restored to defaults"
       - name: Single-node probe via container API
         run: |
           TAG=$(python3 -c "import json;print(json.load(open('/tmp/trial-full.json'))['endpoints'][0]['tag'])")
