@@ -89,6 +89,10 @@ class FixVerificationTests(unittest.TestCase):
         self.assertIn("mux drain", self.text)
         self.assertIn("docker stop", self.text)
 
+    def test_dualpin_verification_step(self) -> None:
+        self.assertIn("verify_dualpin", self.text)
+        self.assertIn("backup", self.text)
+
 
 PUBLISH_WORKFLOW = Path(__file__).resolve().parent.parent / ".github" / "workflows" / "publish-image.yml"
 
