@@ -31,7 +31,8 @@ VPNGate 免费节点（sing-box `openvpn-client`，免 TUN/免特权）+ 双 VLE
        直接 `python railway_manager.py` 会无 VLESS）、`NEZHA_SERVER`/`NEZHA_KEY`、
        `LIMIT`（默认 0=全量）、`REAL_TOPK`（默认 10）、`DIAL_WORKERS`（默认 5，
        真测并发；1GB 内存够用，OOM 就往小调）、`FULL_PROBE_WORKERS`（默认 5，
-       全量真测并发；和 DIAL_WORKERS 叠加受全局 dial gate 上限 10 约束）、`REFRESH_SECONDS`（默认 3600，每小时拉新快照并自动全量真测）、`HEALTH_CHECK_INTERVAL`（默认 20s）、`MAX_MUX_CONNECTIONS`（默认 100）、`NEZHA_URL`（可选）、`SNAPSHOT_URLS`（可选，逗号分隔的快照镜像，主源失败自动顺延）
+       全量真测并发；和 DIAL_WORKERS 叠加受全局 dial gate 上限 10 约束）、`REFRESH_SECONDS`（默认 3600，每小时拉新快照并自动全量真测）、`PROBE_WORKERS`（默认 20，握手并发）、`DIAL_TIMEOUT`（默认 20，真拨超时秒）、`AUTO_REPIN`（默认开，每小时自动重 pin 最优）、`AUTO_RESCUE`（默认开，手动 pin 挂了自动救最优）、`HEALTH_CHECK_INTERVAL`（默认 20s）、`MAX_MUX_CONNECTIONS`（默认 100）、`NEZHA_URL`（可选）、`SNAPSHOT_URLS`（可选，逗号分隔的快照镜像，主源失败自动顺延）
+       以上运行参数也可在控制台「设置」页直接改（`GET/POST /api/settings`，带范围校验），保存进 `settings.json`，重启不丢失，会覆盖 env。
 3. 健康检查：`/` 路径填 `/healthz`（部署时需 200，冷启动靠 last-good 秒回）。
 4. 另加一个 TCP Proxy 指向内部 `3000` 端口（可选，给 SOCKS5 用）。
 5. 持久化（强烈建议）：service → Volumes → Add Volume，加完即可，
