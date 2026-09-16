@@ -1,6 +1,7 @@
 """Tests for railway_manager ($PORT multiplexer + sing-box supervisor)."""
 import base64
 import contextlib
+import inspect
 import json
 import os
 import re
@@ -17,8 +18,10 @@ from unittest import mock
 from railway_manager import (UI_HTML, RailwayManager, _cpu_model, _cpu_pct,
                                _cpu_times, _mem_pct, build_config_from_env,
                                classify_first_bytes, default_fetch)
-from vpngate_to_singbox import (build_singbox_config, nodes_to_endpoints,
-                                ovpn_to_endpoint, snapshot_to_nodes)
+from vpngate_to_singbox import (build_singbox_config, measure_exit_ip,
+                                measure_real_latency, nodes_to_endpoints,
+                                ovpn_to_endpoint, snapshot_to_endpoints,
+                                snapshot_to_nodes)
 
 
 @contextlib.contextmanager
@@ -3037,6 +3040,428 @@ class AuditLowTests(unittest.TestCase):
 
     def test_dead_topnav_input_rule_removed(self) -> None:
         self.assertNotIn("#topnav input{", UI_HTML)
+
+
+class TimeoutDefaultsTests(unittest.TestCase):
+    """Real-tunnel dials time out at 20s by default (CI-measured: alive
+    nodes answer in 3-6s, dead ones burn the full budget)."""
+
+    def test_dial_timeout_defaults_to_twenty(self) -> None:
+        for fn in (measure_real_latency, measure_exit_ip):
+            self.assertEqual(
+                20, inspect.signature(fn).parameters["timeout"].default,
+                fn.__name__)
+        for fn in (snapshot_to_nodes, snapshot_to_endpoints):
+            self.assertEqual(
+                20, inspect.signature(fn).parameters["dial_timeout"].default,
+                fn.__name__)
+
+
+class RefreshIntervalTests(unittest.TestCase):
+    def test_refresh_defaults_to_hourly(self) -> None:
+        env = {"PORT": "3000", "PROXY_USER": "u",
+               "PROXY_PASS": "0123456789abcdef"}
+
+        self.assertEqual(3600, build_config_from_env(env)["refresh_seconds"])
+
+
+class FullProbeOrderTests(unittest.TestCase):
+    """Full probe dials handshake-ascending so the fastest candidates
+    resolve first (progressive pin can serve traffic in seconds)."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"/tmp/railway-ord-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-ord-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-ord-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _post(self, manager, path):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        headers = (f"POST {path} HTTP/1.1\r\nContent-Length: 0\r\n"
+                   f"Authorization: Bearer {self.TOKEN}\r\n")
+        client = FakeClient()
+        manager._handle_http(client, (headers + "\r\n").encode("latin-1"))
+        head, _, body = client.sent.partition(b"\r\n\r\n")
+        return head.decode("latin-1").split("\r\n")[0], body
+
+    def _seed_nodes(self, manager, *specs):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": hand, "real_latency_ms": None,
+                           "speed": 1000,
+                           "endpoint": {"tag": f"vpngate-{i}", "server": ip,
+                                        "server_port": 443}}
+                          for i, (ip, hand) in enumerate(specs)]
+
+    def test_full_probe_dials_handshake_ascending(self) -> None:
+        started: list[str] = []
+        lock = threading.Lock()
+
+        def dial(node):
+            with lock:
+                started.append(node["server"])
+            return 50
+
+        manager = self._manager(dial_fn=dial, full_probe_workers=1)
+        try:
+            self._seed_nodes(manager, ("203.0.113.11", 300),
+                             ("203.0.113.12", 100), ("203.0.113.13", 200))
+            with _fake_singbox():
+                self._post(manager, "/api/full_probe")
+                manager._full_probe_thread.join(timeout=30)
+        finally:
+            manager.stop()
+
+        self.assertEqual(["203.0.113.12", "203.0.113.13", "203.0.113.11"],
+                         started)
+
+
+class RefreshAutoProbeTests(unittest.TestCase):
+    """Every successful refresh kicks off a background full probe."""
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        config_path=f"/tmp/railway-rap-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-rap-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-rap-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def test_successful_refresh_starts_full_probe(self) -> None:
+        manager = self._manager()
+        try:
+            with _fake_singbox(), \
+                 mock.patch("railway_manager.probe_tcp_latency",
+                            return_value=100), \
+                 mock.patch.object(manager, "_start_full_probe",
+                                   return_value=True) as starter:
+                ok = manager.refresh_once(
+                    fetcher=lambda url, timeout: _snapshot_csv(
+                        "203.0.113.11", "203.0.113.12"))
+        finally:
+            manager.stop()
+
+        self.assertTrue(ok)
+        starter.assert_called_once_with()
+
+    def test_failed_refresh_does_not_start_full_probe(self) -> None:
+        manager = self._manager()
+        try:
+            with mock.patch.object(manager, "_start_full_probe",
+                                   return_value=True) as starter:
+                def boom(url, timeout):
+                    raise TimeoutError("network down")
+
+                ok = manager.refresh_once(fetcher=boom)
+        finally:
+            manager.stop()
+
+        self.assertFalse(ok)
+        starter.assert_not_called()
+
+
+class AutoPinTests(unittest.TestCase):
+    """Full-probe completion pins best + backup with guards."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"/tmp/railway-ap-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-ap-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-ap-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _post(self, manager, path):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        headers = (f"POST {path} HTTP/1.1\r\nContent-Length: 0\r\n"
+                   f"Authorization: Bearer {self.TOKEN}\r\n")
+        client = FakeClient()
+        manager._handle_http(client, (headers + "\r\n").encode("latin-1"))
+        head, _, body = client.sent.partition(b"\r\n\r\n")
+        return head.decode("latin-1").split("\r\n")[0], body
+
+    def _seed_nodes(self, manager, *specs):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": hand, "real_latency_ms": None,
+                           "speed": 1000,
+                           "endpoint": {"tag": f"vpngate-{i}", "server": ip,
+                                        "server_port": 443}}
+                          for i, (ip, hand) in enumerate(specs)]
+
+    def _run_probe(self, manager, dial):
+        manager.dial_fn = dial
+        with _fake_singbox():
+            self._post(manager, "/api/full_probe")
+            manager._full_probe_thread.join(timeout=30)
+
+    def test_completion_pins_best_and_second(self) -> None:
+        dial = lambda node: {"203.0.113.11": 70, "203.0.113.12": 30,
+                             "203.0.113.13": 50}[node["server"]]
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, ("203.0.113.11", 100),
+                             ("203.0.113.12", 200), ("203.0.113.13", 300))
+            self._run_probe(manager, dial)
+            written = _read_json(manager.config_path)
+            events = [e["event"] for e in manager.status["refresh_history"]]
+        finally:
+            manager.stop()
+
+        self.assertEqual("vpngate-1", manager.preferred_tag)
+        self.assertEqual("vpngate-2", manager.backup_tag)
+        self.assertEqual("vpngate-2", manager.status["backup_tag"])
+        chain = next(o for o in written["outbounds"] if o["tag"] == "chain")
+        self.assertEqual(["vpngate-1", "vpngate-2", "auto"], chain["outbounds"])
+        self.assertIn("auto-pin", events)
+
+    def test_zero_measured_pins_nothing(self) -> None:
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, ("203.0.113.11", 100),
+                             ("203.0.113.12", 200))
+            self._run_probe(manager, lambda node: None)
+        finally:
+            manager.stop()
+
+        self.assertIsNone(manager.preferred_tag)
+        self.assertIsNone(manager.backup_tag)
+
+    def test_manual_pin_is_respected(self) -> None:
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, ("203.0.113.11", 100),
+                             ("203.0.113.12", 200))
+            manager.preferred_tag = "vpngate-0"
+            manager.status["preferred_tag"] = "vpngate-0"
+            manager._auto_pinned = False
+            self._run_probe(manager, lambda node: 10)
+        finally:
+            manager.stop()
+
+        self.assertEqual("vpngate-0", manager.preferred_tag)
+        self.assertIsNone(manager.backup_tag)
+
+    def test_tie_keeps_current_without_flap(self) -> None:
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, ("203.0.113.11", 100),
+                             ("203.0.113.12", 200))
+            manager.preferred_tag = "vpngate-1"
+            manager.status["preferred_tag"] = "vpngate-1"
+            manager._auto_pinned = True
+            self._run_probe(manager, lambda node: 50)
+        finally:
+            manager.stop()
+
+        self.assertEqual("vpngate-1", manager.preferred_tag)
+        self.assertIsNone(manager.backup_tag)
+
+    def test_single_measured_pins_best_only(self) -> None:
+        dial = lambda node: 40 if node["server"] == "203.0.113.11" else None
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, ("203.0.113.11", 100),
+                             ("203.0.113.12", 200))
+            self._run_probe(manager, dial)
+            written = _read_json(manager.config_path)
+        finally:
+            manager.stop()
+
+        self.assertEqual("vpngate-0", manager.preferred_tag)
+        self.assertIsNone(manager.backup_tag)
+        chain = next(o for o in written["outbounds"] if o["tag"] == "chain")
+        self.assertEqual(["vpngate-0", "auto"], chain["outbounds"])
+
+
+class ProgressivePinTests(unittest.TestCase):
+    """The first measured node serves traffic immediately; the best wins
+    at completion."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"/tmp/railway-pp-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-pp-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-pp-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _post(self, manager, path):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        headers = (f"POST {path} HTTP/1.1\r\nContent-Length: 0\r\n"
+                   f"Authorization: Bearer {self.TOKEN}\r\n")
+        client = FakeClient()
+        manager._handle_http(client, (headers + "\r\n").encode("latin-1"))
+
+    def test_first_measured_pins_before_completion(self) -> None:
+        def dial(node):
+            if node["server"] == "203.0.113.13":
+                time.sleep(3)
+                return 10
+            return {"203.0.113.11": 60, "203.0.113.12": 50}[node["server"]]
+
+        manager = self._manager(dial_fn=dial)
+        try:
+            manager._nodes = [
+                {"server": f"203.0.113.1{i}", "server_port": 443,
+                 "country": "Japan", "country_short": "JP",
+                 "latency_ms": 100 * i, "real_latency_ms": None,
+                 "speed": 1000,
+                 "endpoint": {"tag": f"vpngate-{i - 1}",
+                              "server": f"203.0.113.1{i}",
+                              "server_port": 443}}
+                for i in (1, 2, 3)]
+            with _fake_singbox():
+                self._post(manager, "/api/full_probe")
+                seen: set = set()
+                deadline = time.monotonic() + 20
+                while manager._full_probe_thread.is_alive():
+                    seen.add(manager.preferred_tag)
+                    if time.monotonic() > deadline:
+                        break
+                    time.sleep(0.05)
+                seen.add(manager.preferred_tag)
+                manager._full_probe_thread.join(timeout=30)
+        finally:
+            manager.stop()
+
+        self.assertIn("vpngate-2", [n["endpoint"]["tag"]
+                                    for n in manager._nodes
+                                    if n["real_latency_ms"] == 10])
+        self.assertTrue(seen - {None, "vpngate-2"},
+                        f"no progressive pin observed: {seen}")
+        self.assertEqual("vpngate-2", manager.preferred_tag)
+        self.assertEqual("vpngate-1", manager.backup_tag)
+
+
+class PinStateTests(unittest.TestCase):
+    """backup_tag + auto_pinned survive in state.json; manual switch clears."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, tmpdir, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"{tmpdir}/singbox.json",
+                        nodes_path=f"{tmpdir}/nodes.json",
+                        state_path=f"{tmpdir}/state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def test_switch_clears_backup_and_marks_manual(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                with _fake_singbox(), \
+                     mock.patch("railway_manager.probe_tcp_latency",
+                                return_value=100):
+                    self.assertTrue(manager.refresh_once(
+                        fetcher=lambda url, timeout: _snapshot_csv(
+                            "203.0.113.11", "203.0.113.12")))
+                    ok, _ = manager.switch(tag="vpngate-0")
+                    self.assertTrue(ok)
+                    state = _read_json(f"{tmpdir}/state.json")
+            finally:
+                manager.stop()
+
+        self.assertEqual({"preferred_tag": "vpngate-0", "backup_tag": None,
+                          "auto_pinned": False}, state)
+        self.assertFalse(manager._auto_pinned)
+
+    def test_state_round_trips_backup_and_auto_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                with _fake_singbox(), \
+                     mock.patch("railway_manager.probe_tcp_latency",
+                                return_value=100):
+                    self.assertTrue(manager.refresh_once(
+                        fetcher=lambda url, timeout: _snapshot_csv(
+                            "203.0.113.11", "203.0.113.12")))
+                manager.dial_fn = lambda node: 50
+                with _fake_singbox():
+                    manager._start_full_probe()
+                    manager._full_probe_thread.join(timeout=30)
+            finally:
+                manager.stop()
+
+            reloaded = self._manager(tmpdir)
+            try:
+                _, preferred = reloaded.load_persisted()
+            finally:
+                reloaded.stop()
+
+        self.assertIsNotNone(preferred)
+        self.assertEqual(manager.backup_tag, reloaded.backup_tag)
+        self.assertTrue(reloaded._auto_pinned)
+
+    def test_old_state_file_loads_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = f"{tmpdir}/state.json"
+            with open(state_path, "w", encoding="utf-8") as handle:
+                json.dump({"preferred_tag": "vpngate-0"}, handle)
+            manager = self._manager(tmpdir)
+            try:
+                _, preferred = manager.load_persisted()
+            finally:
+                manager.stop()
+
+        self.assertEqual("vpngate-0", preferred)
+        self.assertIsNone(manager.backup_tag)
+        self.assertFalse(manager._auto_pinned)
+
+
+class DualPinUITests(unittest.TestCase):
+    """Console surfaces the backup pin."""
+
+    def test_backup_tag_surfaced(self) -> None:
+        self.assertIn("backup_tag", UI_HTML)
+
+    def test_backup_label(self) -> None:
+        self.assertIn("备选", UI_HTML)
 
 
 if __name__ == "__main__":
