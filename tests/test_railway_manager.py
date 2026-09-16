@@ -499,6 +499,94 @@ class FullProbeTests(unittest.TestCase):
         self.assertIsNotNone(dial_fn)
 
 
+class FullProbeWorkersTests(unittest.TestCase):
+    """Full probe dials concurrently (default 5, FULL_PROBE_WORKERS)."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"/tmp/railway-fpw-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-fpw-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-fpw-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _post(self, manager, path):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        headers = (f"POST {path} HTTP/1.1\r\nContent-Length: 0\r\n"
+                   f"Authorization: Bearer {self.TOKEN}\r\n")
+        client = FakeClient()
+        manager._handle_http(client, (headers + "\r\n").encode("latin-1"))
+        head, _, body = client.sent.partition(b"\r\n\r\n")
+        return head.decode("latin-1").split("\r\n")[0], body
+
+    def _seed_nodes(self, manager, *ips):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": 100, "real_latency_ms": None,
+                           "speed": 1000} for ip in ips]
+
+    def test_full_probe_dials_concurrently(self) -> None:
+        state = {"cur": 0, "max": 0, "lock": threading.Lock(),
+                 "go": threading.Event()}
+
+        def dial(node):
+            with state["lock"]:
+                state["cur"] += 1
+                state["max"] = max(state["max"], state["cur"])
+                if state["cur"] >= 5:
+                    state["go"].set()
+            state["go"].wait(timeout=10)
+            with state["lock"]:
+                state["cur"] -= 1
+            return 50
+
+        manager = self._manager(dial_fn=dial)
+        try:
+            self._seed_nodes(manager,
+                             *[f"198.51.100.{i}" for i in range(1, 11)])
+            self._post(manager, "/api/full_probe")
+            manager._full_probe_thread.join(timeout=30)
+            results = [n["real_latency_ms"] for n in manager._nodes]
+            done = manager.status["full_probe"]["done"]
+            final = manager.status["full_probe"]["state"]
+        finally:
+            manager.stop()
+
+        self.assertEqual(5, state["max"])
+        self.assertEqual([50] * 10, results)
+        self.assertEqual(10, done)
+        self.assertEqual("done", final)
+
+    def test_full_probe_workers_default_and_env(self) -> None:
+        base = {"PORT": "3000", "PROXY_USER": "u",
+                "PROXY_PASS": "0123456789abcdef"}
+        self.assertEqual(5, build_config_from_env(dict(base))["full_probe_workers"])
+        override = dict(base, FULL_PROBE_WORKERS="2")
+        self.assertEqual(2, build_config_from_env(override)["full_probe_workers"])
+
+    def test_full_probe_workers_clamped_to_one(self) -> None:
+        manager = self._manager(full_probe_workers=0)
+        try:
+            workers = manager.full_probe_workers
+        finally:
+            manager.stop()
+
+        self.assertEqual(1, workers)
+
+
 class SingleProbeTests(unittest.TestCase):
     """POST /api/probe dials one untried node; success auto-marks it usable."""
     TOKEN = "test-admin-token-0123456789abcdef"
