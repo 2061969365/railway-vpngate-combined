@@ -199,6 +199,8 @@ jobs:
           # measure_real_latency path (timeout unchanged at 90s) and reports
           # per-node elapsed. Informational only: slow/dead nodes never fail
           # this step; it answers "how long does a real dial actually take".
+          # pipefail so a script crash fails loudly instead of hiding behind tee.
+          set -o pipefail
           export PATH="$PWD/sing-box-${{ env.SINGBOX_VERSION }}-linux-amd64:$PATH"
           python scripts/measure_dial_times.py --csv /tmp/vpngate.csv \
             --count 6 --timeout 90 --workers 5 | tee /tmp/dial-times.log
