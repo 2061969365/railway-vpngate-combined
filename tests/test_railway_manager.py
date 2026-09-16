@@ -3546,6 +3546,319 @@ class PinStateTests(unittest.TestCase):
         self.assertFalse(manager._auto_pinned)
 
 
+class SettingsApiTests(unittest.TestCase):
+    """GET/POST /api/settings: auth, validation, apply, persistence."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, tmpdir, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"{tmpdir}/singbox.json",
+                        nodes_path=f"{tmpdir}/nodes.json",
+                        state_path=f"{tmpdir}/state.json",
+                        settings_path=f"{tmpdir}/settings.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _request(self, manager, method, path, body=None, token=True):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        raw = f"{method} {path} HTTP/1.1\r\n"
+        if body is not None:
+            payload = json.dumps(body).encode()
+            raw += f"Content-Length: {len(payload)}\r\n"
+        else:
+            payload = b""
+            raw += "Content-Length: 0\r\n"
+        if token:
+            raw += f"Authorization: Bearer {self.TOKEN}\r\n"
+        client = FakeClient()
+        manager._handle_http(client, (raw + "\r\n").encode("latin-1") + payload)
+        head, _, resp_body = client.sent.partition(b"\r\n\r\n")
+        return head.decode("latin-1").split("\r\n")[0], resp_body
+
+    def test_get_requires_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                status_line, _ = self._request(manager, "GET", "/api/settings",
+                                               token=False)
+            finally:
+                manager.stop()
+
+        self.assertIn("401", status_line)
+
+    def test_get_returns_values_and_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                status_line, body = self._request(manager, "GET", "/api/settings")
+                payload = json.loads(body.decode())
+            finally:
+                manager.stop()
+
+        self.assertIn("200", status_line)
+        for key in ("refresh_seconds", "dial_timeout", "real_topk",
+                    "dial_workers", "full_probe_workers", "probe_workers",
+                    "auto_repin", "auto_rescue"):
+            self.assertIn(key, payload["values"], key)
+            self.assertIn(key, payload["bounds"], key)
+        self.assertEqual(3600, payload["values"]["refresh_seconds"])
+        self.assertEqual(20, payload["values"]["dial_timeout"])
+        self.assertTrue(payload["values"]["auto_repin"])
+
+    def test_post_rejects_unknown_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                status_line, body = self._request(
+                    manager, "POST", "/api/settings", {"PORT": 3000})
+            finally:
+                manager.stop()
+
+        self.assertIn("400", status_line)
+        self.assertFalse(json.loads(body.decode())["ok"])
+
+    def test_post_rejects_out_of_range(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                status_line, _ = self._request(
+                    manager, "POST", "/api/settings",
+                    {"refresh_seconds": 60})
+            finally:
+                manager.stop()
+
+        self.assertIn("400", status_line)
+
+    def test_post_rejects_wrong_type(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                status_line, _ = self._request(
+                    manager, "POST", "/api/settings",
+                    {"dial_workers": "lots"})
+            finally:
+                manager.stop()
+
+        self.assertIn("400", status_line)
+
+    def test_post_applies_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                status_line, body = self._request(
+                    manager, "POST", "/api/settings",
+                    {"refresh_seconds": 1800, "dial_timeout": 45,
+                     "auto_repin": False})
+                self.assertIn("200", status_line)
+                self.assertTrue(json.loads(body.decode())["ok"])
+                saved = _read_json(f"{tmpdir}/settings.json")
+            finally:
+                manager.stop()
+
+            reloaded = self._manager(tmpdir)
+            try:
+                values = reloaded.settings_snapshot()["values"]
+            finally:
+                reloaded.stop()
+
+        self.assertEqual(1800, manager.refresh_seconds)
+        self.assertEqual(45, manager.dial_timeout)
+        self.assertFalse(manager.auto_repin)
+        self.assertEqual(1800, saved["refresh_seconds"])
+        self.assertEqual(1800, values["refresh_seconds"])
+        self.assertEqual(45, values["dial_timeout"])
+
+    def test_new_env_defaults(self) -> None:
+        base = {"PORT": "3000", "PROXY_USER": "u",
+                "PROXY_PASS": "0123456789abcdef"}
+        cfg = build_config_from_env(dict(base))
+        self.assertEqual(20, cfg["dial_timeout"])
+        self.assertEqual(20, cfg["probe_workers"])
+        self.assertTrue(cfg["auto_repin"])
+        self.assertTrue(cfg["auto_rescue"])
+        override = dict(base, DIAL_TIMEOUT="45", PROBE_WORKERS="30",
+                        AUTO_REPIN="0", AUTO_RESCUE="false")
+        cfg = build_config_from_env(override)
+        self.assertEqual(45, cfg["dial_timeout"])
+        self.assertEqual(30, cfg["probe_workers"])
+        self.assertFalse(cfg["auto_repin"])
+        self.assertFalse(cfg["auto_rescue"])
+
+
+class DialTimeoutPlumbingTests(unittest.TestCase):
+    """Configured dial timeout reaches all four real-tunnel paths."""
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        config_path=f"/tmp/railway-dtp-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-dtp-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-dtp-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def test_default_dial_fn_uses_configured_timeout(self) -> None:
+        manager = self._manager()
+        try:
+            node = {"endpoint": {"server": "203.0.113.11", "server_port": 443}}
+            with mock.patch("railway_manager.measure_real_latency",
+                            return_value=100) as dial:
+                manager.dial_fn(node)
+                manager.update_settings({"dial_timeout": 45})
+                manager.dial_fn(node)
+        finally:
+            manager.stop()
+
+        timeouts = [call.kwargs.get("timeout", call.args[2]
+                                    if len(call.args) > 2 else None)
+                    for call in dial.call_args_list]
+        self.assertEqual([20, 45], timeouts)
+
+    def test_default_verify_fn_uses_configured_timeout(self) -> None:
+        manager = self._manager()
+        try:
+            endpoint = {"server": "203.0.113.11", "server_port": 443}
+            with mock.patch("railway_manager.measure_exit_ip",
+                            return_value=("1.2.3.4", 100)) as verify:
+                manager.verify_fn(endpoint)
+                manager.update_settings({"dial_timeout": 45})
+                manager.verify_fn(endpoint)
+        finally:
+            manager.stop()
+
+        timeouts = [call.kwargs.get("timeout", call.args[2]
+                                    if len(call.args) > 2 else None)
+                    for call in verify.call_args_list]
+        self.assertEqual([20, 45], timeouts)
+
+    def test_refresh_forwards_probe_workers_and_timeout(self) -> None:
+        manager = self._manager(probe_workers=33, dial_timeout=44)
+        try:
+            with mock.patch("railway_manager.snapshot_to_nodes",
+                            return_value=[]) as snapshot_mock:
+                manager.refresh_once(
+                    fetcher=lambda url, timeout: _snapshot_csv("203.0.113.11"))
+        finally:
+            manager.stop()
+
+        _, kwargs = snapshot_mock.call_args
+        self.assertEqual(33, kwargs.get("probe_workers"))
+        self.assertEqual(44, kwargs.get("dial_timeout"))
+
+
+class AutoPinFlagTests(unittest.TestCase):
+    """auto_repin=False disables hourly re-pin; auto_rescue=False keeps
+    the legacy unpin-to-auto fallback."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"/tmp/railway-apf-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-apf-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-apf-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _post(self, manager, path):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        headers = (f"POST {path} HTTP/1.1\r\nContent-Length: 0\r\n"
+                   f"Authorization: Bearer {self.TOKEN}\r\n")
+        client = FakeClient()
+        manager._handle_http(client, (headers + "\r\n").encode("latin-1"))
+
+    def _seed_nodes(self, manager, *specs):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": hand, "real_latency_ms": None,
+                           "speed": 1000,
+                           "endpoint": {"tag": f"vpngate-{i}", "server": ip,
+                                        "server_port": 443}}
+                          for i, (ip, hand) in enumerate(specs)]
+
+    def test_auto_repin_off_skips_pin(self) -> None:
+        manager = self._manager(auto_repin=False)
+        try:
+            self._seed_nodes(manager, ("203.0.113.11", 100),
+                             ("203.0.113.12", 200))
+            manager.dial_fn = lambda node: 50
+            with _fake_singbox():
+                self._post(manager, "/api/full_probe")
+                manager._full_probe_thread.join(timeout=30)
+                events = [e["event"]
+                          for e in manager.status["refresh_history"]]
+        finally:
+            manager.stop()
+
+        self.assertIsNone(manager.preferred_tag)
+        self.assertIn("auto-pin-skipped", events)
+
+    def test_auto_rescue_off_falls_back_to_auto(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(
+                config_path=f"{tmpdir}/singbox.json",
+                nodes_path=f"{tmpdir}/nodes.json",
+                state_path=f"{tmpdir}/state.json",
+                auto_rescue=False)
+            try:
+                with _fake_singbox(), \
+                     mock.patch("railway_manager.probe_tcp_latency",
+                                return_value=100):
+                    self.assertTrue(manager.refresh_once(
+                        fetcher=lambda url, timeout: _snapshot_csv(
+                            "203.0.113.11", "203.0.113.12")))
+                    manager.switch(tag="vpngate-0")
+                    by_server = {n["server"]: n for n in manager._nodes}
+                    by_server["203.0.113.11"]["real_latency_ms"] = 70
+                    by_server["203.0.113.12"]["real_latency_ms"] = 30
+
+                    failing = lambda host, port, timeout=5: 0
+                    self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+                    self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+                    self.assertEqual("unpinned", manager.check_pinned_health(probe_fn=failing))
+                self.assertIsNone(manager.preferred_tag)
+            finally:
+                manager.stop()
+
+
+class SettingsUITests(unittest.TestCase):
+    """Console settings section is wired to /api/settings."""
+
+    def test_settings_section_and_nav(self) -> None:
+        self.assertIn('id="sec-settings"', UI_HTML)
+        self.assertIn('#sec-settings', UI_HTML)
+        self.assertIn("sec-settings", UI_HTML)
+
+    def test_settings_js_wired(self) -> None:
+        self.assertIn("loadSettings(", UI_HTML)
+        self.assertIn("saveSettings(", UI_HTML)
+        self.assertIn("/api/settings", UI_HTML)
+        self.assertIn('id="btn-settings-save"', UI_HTML)
+
+
 class DualPinUITests(unittest.TestCase):
     """Console surfaces the backup pin."""
 
