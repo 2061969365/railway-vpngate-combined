@@ -1,9 +1,10 @@
 """Time real tunnel dials (CI instrumentation, informational only).
 
 Reads a VPNGate snapshot CSV, handshake-ranks the top candidates, dials a
-spread of them through the production measure_real_latency path (timeout
-unchanged) and prints per-node elapsed + summary. Slow/dead nodes never
-fail the run; exit nonzero only on infra errors (unreadable snapshot).
+spread of them through the production measure_real_latency path (20s
+timeout, same as production) and prints per-node elapsed + summary.
+Slow/dead nodes never fail the run; exit nonzero only on infra errors
+(unreadable snapshot).
 """
 from __future__ import annotations
 
@@ -96,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Time real tunnel dials")
     parser.add_argument("--csv", required=True, help="VPNGate snapshot CSV path")
     parser.add_argument("--count", type=int, default=6)
-    parser.add_argument("--timeout", type=int, default=90)
+    parser.add_argument("--timeout", type=int, default=20)
     parser.add_argument("--workers", type=int, default=5)
     parser.add_argument("--limit", type=int, default=12)
     parser.add_argument("--singbox-bin", default="sing-box")
