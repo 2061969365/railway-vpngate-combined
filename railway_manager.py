@@ -667,7 +667,11 @@ function renderStatusbar(s, pref) {
   const pinIp = pinEp.server || s.preferred_tag;
   const nodeEl = document.getElementById("sb-node");
   nodeEl.textContent = s.preferred_tag ? (pinIp + " · 已 pin") : (pref ? ((pref.server || pref.tag) + " · 自动") : "—");
-  nodeEl.title = s.preferred_tag ? "已 pin：手动锁定该出口" : "自动：由 urltest 优选";
+  const backupIp = s.backup_tag ? ipOf(s.backup_tag) : null;
+  nodeEl.title = s.preferred_tag
+    ? ((s.auto_pinned ? "自动优选：全量实测最低" : "已 pin：手动锁定该出口") +
+       (backupIp ? " · 备选 " + backupIp : ""))
+    : "自动：由 urltest 优选";
   const dot = document.getElementById("sb-dot");
   if (dot) {
     const age = lastOkAt ? Math.round((Date.now() - lastOkAt) / 1000) : 1e9;
@@ -1192,7 +1196,7 @@ def build_config_from_env(env: dict) -> dict:
         "admin_token_generated": generated,
         "snapshot_url": snapshot_url,
         "snapshot_urls": snapshot_urls,
-        "refresh_seconds": int(env.get("REFRESH_SECONDS", "1200")),
+        "refresh_seconds": int(env.get("REFRESH_SECONDS", "3600")),
         "limit": int(env.get("LIMIT", "0")),
         "real_topk": int(env.get("REAL_TOPK", "10")),
         "dial_workers": int(env.get("DIAL_WORKERS", "5")),
@@ -1475,6 +1479,8 @@ class RailwayManager:
         self.disguise_path = disguise_path
         self._cloudflared_proc: subprocess.Popen | None = None
         self.preferred_tag: str | None = None
+        self.backup_tag: str | None = None
+        self._auto_pinned = False
         self._nodes: list[dict] = []
         self._first_seen: dict[str, str] = {}
         self._cpu_model = _cpu_model()
@@ -1490,6 +1496,8 @@ class RailwayManager:
             "endpoints": [],
             "countries": [],
             "preferred_tag": None,
+            "backup_tag": None,
+            "auto_pinned": False,
             "refresh_history": [],
             "refresh_ok": 0,
             "refresh_fail": 0,
@@ -1925,7 +1933,9 @@ class RailwayManager:
             del self.status["refresh_history"][:-20]
 
     def _persist_state(self) -> None:
-        _write_private_json(self.state_path, {"preferred_tag": self.preferred_tag})
+        _write_private_json(self.state_path, {"preferred_tag": self.preferred_tag,
+                                              "backup_tag": self.backup_tag,
+                                              "auto_pinned": self._auto_pinned})
 
     def _persist_nodes(self) -> None:
         _write_private_json(self.nodes_path,
@@ -1942,15 +1952,22 @@ class RailwayManager:
         except (OSError, ValueError):
             pass
         preferred: str | None = None
+        backup: str | None = None
+        auto_pinned = False
         try:
             with open(self.state_path, encoding="utf-8") as handle:
-                preferred = json.load(handle).get("preferred_tag")
+                saved_state = json.load(handle)
+            preferred = saved_state.get("preferred_tag")
+            backup = saved_state.get("backup_tag")
+            auto_pinned = bool(saved_state.get("auto_pinned", False))
         except (OSError, ValueError):
             pass
         with self._lock:
             self._nodes = nodes
             self._first_seen = first_seen
             self.preferred_tag = preferred
+            self.backup_tag = backup
+            self._auto_pinned = auto_pinned
         return nodes, preferred
 
     def _boot_from_last_good(self) -> bool:
@@ -2081,8 +2098,12 @@ class RailwayManager:
             if self._pinned_fail_streak < PINNED_FAIL_THRESHOLD:
                 return "pinned"
             self.preferred_tag = None
+            self.backup_tag = None
+            self._auto_pinned = True
             self._pinned_fail_streak = 0
             self.status["preferred_tag"] = None
+            self.status["backup_tag"] = None
+            self.status["auto_pinned"] = True
             self._persist_state()
         self._apply_config(final="auto")
         self._record_history("auto-unpin",
@@ -2124,7 +2145,11 @@ class RailwayManager:
             return False, "config check failed, kept previous"
         with self._lock:
             self.preferred_tag = target
+            self.backup_tag = None
+            self._auto_pinned = False
             self.status["preferred_tag"] = target
+            self.status["backup_tag"] = None
+            self.status["auto_pinned"] = False
             self._persist_state()
         self._pinned_fail_streak = 0
         self._record_history("switch", f"final={effective}")
@@ -2147,12 +2172,15 @@ class RailwayManager:
                 return False
         return True
 
-    def _apply_config(self, final: str = "auto", preferred: str | None = None) -> bool:
+    def _apply_config(self, final: str = "auto", preferred: str | None = None,
+                      backup: str | None = None) -> bool:
         """Write checked config atomically and restart sing-box. Returns success.
 
         preferred names the pinned endpoint tag: it becomes first in the
         "chain" selector (route.final="chain") with "auto" as hot-standby,
-        never a bare single-endpoint final. When the resulting serving
+        never a bare single-endpoint final. Pass backup (a second endpoint
+        tag) to seat it between preferred and "auto": best first, guaranteed
+        backup second, urltest last. When the resulting serving
         config is identical to the running one, the restart is skipped so
         live connections survive refreshes and no-op switches.
         """
@@ -2169,7 +2197,7 @@ class RailwayManager:
         config = build_singbox_config(
             endpoints, "127.0.0.1", mixed_port,
             mixed_users=[(username, password)], final=final,
-            preferred=preferred,
+            preferred=preferred, backup=backup,
             vless_uuid=vless_uuid,
             vless_direct_port=direct_port,
             vless_chain_port=chain_port)
@@ -2251,15 +2279,23 @@ class RailwayManager:
             assign_stable_tags(nodes, self._nodes)
             self._nodes = nodes
             endpoints = nodes_to_endpoints(nodes)
-            if self.preferred_tag not in {ep["tag"] for ep in endpoints}:
+            endpoint_tags = {ep["tag"] for ep in endpoints}
+            if self.preferred_tag not in endpoint_tags:
                 if self.preferred_tag is not None:
                     self._record_history("preferred-gone",
                                          f"{self.preferred_tag} vanished, back to auto")
                 self.preferred_tag = None
+                self.backup_tag = None
+                self._auto_pinned = True
             preferred = self.preferred_tag
+            backup = (self.backup_tag if self.backup_tag in endpoint_tags
+                      else None)
+            if backup != self.backup_tag:
+                self.backup_tag = backup
         # route.final stays on the hot-standby path: "chain" (preferred first,
         # urltest group second) when pinned, plain "auto" otherwise.
-        if not self._apply_config(final="auto", preferred=preferred):
+        if not self._apply_config(final="auto", preferred=preferred,
+                                   backup=backup):
             return self._refresh_failed("config check failed, kept previous")
         with self._lock:
             self.status["endpoints"] = [
@@ -2271,6 +2307,8 @@ class RailwayManager:
                 for ep, n in zip(endpoints, nodes)]
             self.status["countries"] = self._countries()
             self.status["preferred_tag"] = self.preferred_tag
+            self.status["backup_tag"] = self.backup_tag
+            self.status["auto_pinned"] = self._auto_pinned
             self.status["last_refresh"] = _now_iso()
             self.status["last_error"] = None
             self.status["refresh_ok"] += 1
@@ -2281,6 +2319,9 @@ class RailwayManager:
         effective = "chain" if preferred else "auto"
         self._record_history("refresh-ok", f"{len(endpoints)} endpoints, final={effective}")
         print(f"refreshed {len(endpoints)} endpoints, final={effective}", flush=True)
+        # Every successful refresh (boot, periodic, manual) kicks off a
+        # background full probe; single-flight skips when one runs already.
+        self._start_full_probe()
         return True
 
     def _refresh_failed(self, reason: str) -> bool:
@@ -2311,27 +2352,120 @@ class RailwayManager:
         nodes = list(self._nodes)
         with self._lock:
             self.status["full_probe"]["total"] = len(nodes)
-        # Concurrent dials (default 5): each dial owns its temp dir, port
-        # and sing-box process, with the global _DIAL_GATE (10) as backstop,
-        # so workers never step on each other. done counts completions, so
-        # progress jumps as workers finish rather than in list order.
+            start_preferred = self.preferred_tag
+            start_auto = self._auto_pinned
+        # Dial handshake-ascending so the fastest candidates resolve first;
+        # the first measured node can serve traffic within seconds while the
+        # rest keep dialing. done counts completions, so progress jumps as
+        # workers finish rather than in list order.
+        ordered = sorted(
+            nodes,
+            key=lambda n: (n.get("latency_ms") is None,
+                           n.get("latency_ms") or 0,
+                           n.get("server") or ""))
+        first_pinned = {"done": False}
 
         def _dial_one(node: dict) -> None:
             try:
                 ms = self.dial_fn(node) if self.dial_fn else None
             except Exception:
                 ms = None
+            tag = (node.get("endpoint") or {}).get("tag")
             with self._lock:
                 node["real_latency_ms"] = ms
                 self.status["full_probe"]["done"] += 1
+                first = (ms is not None and tag
+                         and not first_pinned["done"]
+                         and start_preferred is None)
+                if first:
+                    first_pinned["done"] = True
+            if first:
+                self._auto_pin_single(tag)
 
         with ThreadPoolExecutor(max_workers=self.full_probe_workers) as executor:
-            list(executor.map(_dial_one, nodes))
+            list(executor.map(_dial_one, ordered))
         with self._lock:
             self._sync_probe_results(nodes)
             self.status["full_probe"]["state"] = "done"
+        self._auto_pin_best(nodes, start_preferred, start_auto)
         self._record_history("full-probe-done",
                              f"{len(nodes)} nodes dialed")
+
+    def _auto_pin_single(self, tag: str) -> None:
+        """Pin the first measured node immediately (auto track only).
+
+        Gives serving traffic a live tunnel within seconds instead of
+        waiting for the whole pool. Only fires while still unpinned;
+        the completion pass upgrades to best + backup.
+        """
+        with self._lock:
+            if self.preferred_tag is not None:
+                return
+        if not self._apply_config(final="auto", preferred=tag):
+            return
+        with self._lock:
+            if self.preferred_tag is not None:
+                return
+            self.preferred_tag = tag
+            self.backup_tag = None
+            self._auto_pinned = True
+            self.status["preferred_tag"] = tag
+            self.status["backup_tag"] = None
+            self.status["auto_pinned"] = True
+            self._persist_state()
+        self._record_history("auto-pin-first", tag)
+
+    def _auto_pin_best(self, nodes: list[dict], start_preferred: str | None,
+                       start_auto: bool) -> None:
+        """Pin best + backup after a full probe, with guards.
+
+        Skips when nothing measured, when the user pinned manually mid-run,
+        or when the run started pinned and the user has since switched.
+        Keeps the current pin on ties or when it still measures best, so
+        hourly cycles don't flap the serving config.
+        """
+        measured = sorted(
+            (n for n in nodes
+             if n.get("real_latency_ms") is not None
+             and (n.get("endpoint") or {}).get("tag")),
+            key=lambda n: (n["real_latency_ms"],
+                           (n.get("endpoint") or {}).get("tag") or ""))
+        if not measured:
+            return
+        best = (measured[0].get("endpoint") or {}).get("tag")
+        second = ((measured[1].get("endpoint") or {}).get("tag")
+                  if len(measured) > 1 else None)
+        best_ms = measured[0]["real_latency_ms"]
+        with self._lock:
+            if self.preferred_tag is not None and not self._auto_pinned:
+                return
+            if (start_preferred is not None
+                    and self.preferred_tag != start_preferred):
+                return
+            if self.preferred_tag is not None:
+                cur_ms = next(
+                    (n["real_latency_ms"] for n in measured
+                     if (n.get("endpoint") or {}).get("tag")
+                     == self.preferred_tag),
+                    None)
+                if cur_ms is not None and cur_ms <= best_ms:
+                    return
+        if not self._apply_config(final="auto", preferred=best,
+                                  backup=second):
+            self._record_history("auto-pin-failed", best)
+            return
+        with self._lock:
+            if self.preferred_tag is not None and not self._auto_pinned:
+                return
+            self.preferred_tag = best
+            self.backup_tag = second
+            self._auto_pinned = True
+            self.status["preferred_tag"] = best
+            self.status["backup_tag"] = second
+            self.status["auto_pinned"] = True
+            self._persist_state()
+        self._record_history(
+            "auto-pin", best + (f" backup={second}" if second else ""))
 
     def _sync_probe_results(self, nodes: list[dict]) -> None:
         by_key = {(ep.get("server"), ep.get("server_port")): ep
