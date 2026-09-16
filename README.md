@@ -36,7 +36,7 @@ VPNGate 免费节点（sing-box `openvpn-client`，免 TUN/免特权）+ 双 VLE
 5. 持久化（强烈建议）：service → Volumes → Add Volume，加完即可，
    无需配任何变量。代码会自动用 Railway 注入的
    `RAILWAY_VOLUME_MOUNT_PATH` 存 sing-box 配置/节点存档/last-good
-   （`DATA_DIR` 显式设置会优先）。不挂卷的话每次重部署从 Top30 冷启动。
+   （`DATA_DIR` 显式设置会优先）。不挂卷的话每次重部署全量握手发现后冷启动（last-good 先顶住健康检查）。
 
 > 合规警告：Railway AUP 明文禁止 proxy/anonymization 服务，
 > 长期运行有封号风险，仅适合临时演示/调试。
