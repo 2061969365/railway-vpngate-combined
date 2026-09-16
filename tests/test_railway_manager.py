@@ -2799,5 +2799,138 @@ class AuditFixBConsoleTests(unittest.TestCase):
         self.assertNotIn("disabled title='先测速", UI_HTML)
 
 
+class AuditP2StatsTests(unittest.TestCase):
+    """P2-1:统计卡布局/单位/时长/错误外露."""
+
+    def test_stats_grid_auto_fit(self) -> None:
+        self.assertIn("auto-fit", UI_HTML)
+
+    def test_traffic_keeps_unit(self) -> None:
+        self.assertNotIn('replace(" GB"', UI_HTML)
+
+    def test_uptime_humanized(self) -> None:
+        self.assertIn("function fmtDur(", UI_HTML)
+
+    def test_refresh_error_chip(self) -> None:
+        self.assertIn('id="stat-err"', UI_HTML)
+
+    def test_history_line_chinese(self) -> None:
+        self.assertIn("刷新成功/失败", UI_HTML)
+        self.assertNotIn("refresh ok/fail:", UI_HTML)
+
+    def test_history_keeps_twenty(self) -> None:
+        self.assertIn(".slice(0, 20)", UI_HTML)
+        self.assertNotIn(".slice(0, 12)", UI_HTML)
+
+
+class AuditP2LogsTests(unittest.TestCase):
+    """P2-2:日志搜索/自动滚动/自动刷新/级别说明/深色样式."""
+
+    def test_log_search_and_autoscroll(self) -> None:
+        self.assertIn('id="log-search"', UI_HTML)
+        self.assertIn('id="log-auto"', UI_HTML)
+
+    def test_loglevel_dark_styled(self) -> None:
+        self.assertIn("#sortsel,#scope,#loglevel", UI_HTML)
+
+    def test_loglevel_documents_mapping(self) -> None:
+        self.assertIn("error≈fail", UI_HTML)
+
+
+class AuditP2SubTests(unittest.TestCase):
+    """P2-3:订阅死链消除/行标签/host 说明/复制全部."""
+
+    def test_sub_nav_toggleable(self) -> None:
+        self.assertIn('id="nav-sub"', UI_HTML)
+
+    def test_sub_rows_labeled(self) -> None:
+        self.assertIn("直连", UI_HTML)
+        self.assertIn("跟随当前出口", UI_HTML)
+
+    def test_sub_host_note(self) -> None:
+        self.assertIn('id="sub-host"', UI_HTML)
+
+    def test_copy_all_present(self) -> None:
+        self.assertIn('id="btn-copy-all"', UI_HTML)
+
+
+class AuditP2MobileTests(unittest.TestCase):
+    """P2-4:移动端导航保留/粘性列."""
+
+    def test_nav_not_removed_on_mobile(self) -> None:
+        self.assertNotIn("#topnav .links{display:none}", UI_HTML)
+
+    def test_sticky_columns(self) -> None:
+        self.assertIn("td:first-child", UI_HTML)
+        self.assertIn("sticky", UI_HTML)
+
+
+class AuditP2LoginThemeTests(unittest.TestCase):
+    """P2-5:登录手感/主题入口/文案中文化."""
+
+    def test_token_show_toggle(self) -> None:
+        self.assertIn('id="btn-show-token"', UI_HTML)
+
+    def test_gate_theme_toggle(self) -> None:
+        self.assertIn('id="btn-theme-gate"', UI_HTML)
+
+    def test_login_sub_names_variables(self) -> None:
+        self.assertIn("Variables", UI_HTML)
+
+    def test_theme_label_is_action(self) -> None:
+        self.assertIn("切换到", UI_HTML)
+
+    def test_no_english_loading(self) -> None:
+        self.assertNotIn("loading…", UI_HTML)
+        self.assertIn("加载中…", UI_HTML)
+
+    def test_no_english_fetch_error(self) -> None:
+        self.assertNotIn("status fetch failed:", UI_HTML)
+
+    def test_live_named_and_titled(self) -> None:
+        self.assertIn('lang="en">LIVE', UI_HTML)
+        self.assertIn('title="自动刷新每15秒"', UI_HTML)
+
+
+class AuditP2A11yTests(unittest.TestCase):
+    """P2-6:骨架屏/ toast 分流/曲线替代/顶栏不透明."""
+
+    def test_skeleton_hidden_from_at(self) -> None:
+        self.assertIn("aria-hidden='true'", UI_HTML)
+        self.assertIn('id="load-note"', UI_HTML)
+
+    def test_vh_class_present(self) -> None:
+        self.assertIn(".vh{", UI_HTML)
+
+    def test_alerts_container(self) -> None:
+        self.assertIn('id="alerts"', UI_HTML)
+
+    def test_spark_alternative(self) -> None:
+        self.assertIn('role="img"', UI_HTML)
+        self.assertIn('id="spark-alt"', UI_HTML)
+
+    def test_dark_bars_opaque(self) -> None:
+        self.assertIn("rgba(10,12,24,.88)", UI_HTML)
+
+
+class AuditLowTests(unittest.TestCase):
+    """Low:400 detail/toast 浅色/dot 文本/冗余清理/死规则."""
+
+    def test_api_surfaces_detail(self) -> None:
+        self.assertIn(".detail ||", UI_HTML)
+
+    def test_toast_light_card(self) -> None:
+        self.assertIn('html[data-theme="light"] .toast-msg', UI_HTML)
+
+    def test_dot_has_text(self) -> None:
+        self.assertIn('id="sb-dot-txt"', UI_HTML)
+
+    def test_no_redundant_aria_disabled(self) -> None:
+        self.assertNotIn("aria-disabled='true' disabled", UI_HTML)
+
+    def test_dead_topnav_input_rule_removed(self) -> None:
+        self.assertNotIn("#topnav input{", UI_HTML)
+
+
 if __name__ == "__main__":
     unittest.main()
