@@ -14,6 +14,10 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+# When run as `python scripts/measure_dial_times.py`, only scripts/ is on
+# sys.path; add the repo root so the vpngate_to_singbox import resolves.
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+
 from vpngate_to_singbox import (
     measure_real_latency,
     snapshot_to_nodes,
