@@ -2078,7 +2078,8 @@ class RailwayManager:
                 print(f"health monitor error: {type(exc).__name__}: {exc}", flush=True)
 
     def check_pinned_health(self, probe_fn=None) -> str:
-        """Probe the pinned endpoint; auto-unpin to urltest after 3 straight failures."""
+        """Probe the pinned endpoint; rescue to the measured best after
+        3 straight failures (manual pins included)."""
         with self._lock:
             tag = self.preferred_tag
             node = next((n for n in self._nodes
@@ -2097,18 +2098,47 @@ class RailwayManager:
             self._pinned_fail_streak += 1
             if self._pinned_fail_streak < PINNED_FAIL_THRESHOLD:
                 return "pinned"
-            self.preferred_tag = None
-            self.backup_tag = None
-            self._auto_pinned = True
+            measured = sorted(
+                (n for n in self._nodes
+                 if n.get("real_latency_ms") is not None
+                 and (n.get("endpoint") or {}).get("tag")
+                 and (n.get("endpoint") or {}).get("tag") != tag),
+                key=lambda n: (n["real_latency_ms"],
+                               (n.get("endpoint") or {}).get("tag") or ""))
+            best = ((measured[0].get("endpoint") or {}).get("tag")
+                    if measured else None)
+            second = ((measured[1].get("endpoint") or {}).get("tag")
+                      if len(measured) > 1 else None)
             self._pinned_fail_streak = 0
-            self.status["preferred_tag"] = None
-            self.status["backup_tag"] = None
+            if best is None:
+                self.preferred_tag = None
+                self.backup_tag = None
+                self._auto_pinned = True
+                self.status["preferred_tag"] = None
+                self.status["backup_tag"] = None
+                self.status["auto_pinned"] = True
+                self._persist_state()
+        if best is None:
+            self._apply_config(final="auto")
+            self._record_history("auto-unpin",
+                                 f"{tag} failed {PINNED_FAIL_THRESHOLD}x, fell back to auto")
+            return "unpinned"
+        if not self._apply_config(final="auto", preferred=best,
+                                  backup=second):
+            return "pinned"
+        with self._lock:
+            self.preferred_tag = best
+            self.backup_tag = second
+            self._auto_pinned = True
+            self.status["preferred_tag"] = best
+            self.status["backup_tag"] = second
             self.status["auto_pinned"] = True
             self._persist_state()
-        self._apply_config(final="auto")
-        self._record_history("auto-unpin",
-                             f"{tag} failed {PINNED_FAIL_THRESHOLD}x, fell back to auto")
-        return "unpinned"
+        self._record_history(
+            "auto-rescue",
+            f"{tag} failed {PINNED_FAIL_THRESHOLD}x, rescued to {best}"
+            + (f" backup={second}" if second else ""))
+        return "rescued"
 
     def switch(self, tag: str | None = None, country: str | None = None) -> tuple[bool, str]:
         with self._lock:
@@ -2355,7 +2385,6 @@ class RailwayManager:
         with self._lock:
             self.status["full_probe"]["total"] = len(nodes)
             start_preferred = self.preferred_tag
-            start_auto = self._auto_pinned
         # Dial handshake-ascending so the fastest candidates resolve first.
         # done counts completions, so progress jumps as workers finish
         # rather than in list order. No pin happens mid-run: the serving
@@ -2380,15 +2409,8 @@ class RailwayManager:
             list(executor.map(_dial_one, ordered))
         with self._lock:
             self.status["full_probe"]["state"] = "done"
-            first_run = self.preferred_tag is None
             self._sync_probe_results(nodes)
-            if not first_run:
-                self._record_history(
-                    "auto-pin-skipped",
-                    f"later cycle, measure-only (auto_pinned={self._auto_pinned} "
-                    f"preferred={self.preferred_tag})")
-        self._auto_pin_best(nodes, start_preferred, start_auto,
-                            first_run=first_run)
+        self._auto_pin_best(nodes, start_preferred)
         self._record_history("full-probe-done",
                              f"{len(nodes)} nodes dialed")
 
@@ -2416,18 +2438,18 @@ class RailwayManager:
             self._persist_state()
         self._record_history("auto-pin-first", tag)
 
-    def _auto_pin_best(self, nodes: list[dict], start_preferred: str | None,
-                       start_auto: bool, first_run: bool = True) -> None:
+    def _auto_pin_best(self, nodes: list[dict],
+                       start_preferred: str | None) -> None:
         """Pin best + backup after a full probe, with guards.
 
-        Skips when nothing measured or when the user pinned manually
-        mid-run. Unpinned boxes (cold boot, post-unpin) pin the measured
-        best on the first completed run; later cycles only refresh
-        measurements so the live connection never flaps. Keeps the current
-        pin on ties or when it still measures best.
+        Auto track re-pins to the measured best every completed run, so
+        hourly cycles follow the fastest node. Manual pins are never
+        overridden here (a manual death is rescued by the health
+        monitor instead). Skips when nothing measured or when the user
+        pinned/switched mid-run. Keeps the current pin on ties or when
+        it still measures best, so unchanged pools don't flap the
+        serving config.
         """
-        if not first_run:
-            return
         measured = sorted(
             (n for n in nodes
              if n.get("real_latency_ms") is not None
