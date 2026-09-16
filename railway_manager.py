@@ -31,6 +31,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from vpngate_to_singbox import (
@@ -1195,6 +1196,7 @@ def build_config_from_env(env: dict) -> dict:
         "limit": int(env.get("LIMIT", "0")),
         "real_topk": int(env.get("REAL_TOPK", "10")),
         "dial_workers": int(env.get("DIAL_WORKERS", "5")),
+        "full_probe_workers": int(env.get("FULL_PROBE_WORKERS", "5")),
         "health_check_interval": int(env.get("HEALTH_CHECK_INTERVAL", "20")),
         "max_mux_connections": int(env.get("MAX_MUX_CONNECTIONS", "100")),
         "data_dir": env.get("DATA_DIR")
@@ -1413,6 +1415,7 @@ class RailwayManager:
         real_topk: int = 0,
         dial_fn=None,
         dial_workers: int = 10,
+        full_probe_workers: int = 5,
         verify_fn=None,
         vless_uuid: str = "",
         vless_direct_port: int = 8080,
@@ -1448,6 +1451,7 @@ class RailwayManager:
                         (lambda node: measure_real_latency(
                             node["endpoint"], self.singbox_bin)))
         self.dial_workers = dial_workers
+        self.full_probe_workers = max(1, full_probe_workers)
         self.verify_fn = (verify_fn if verify_fn is not None else
                           (lambda endpoint: measure_exit_ip(
                               endpoint, self.singbox_bin)))
@@ -2307,14 +2311,22 @@ class RailwayManager:
         nodes = list(self._nodes)
         with self._lock:
             self.status["full_probe"]["total"] = len(nodes)
-        for i, node in enumerate(nodes):
+        # Concurrent dials (default 5): each dial owns its temp dir, port
+        # and sing-box process, with the global _DIAL_GATE (10) as backstop,
+        # so workers never step on each other. done counts completions, so
+        # progress jumps as workers finish rather than in list order.
+
+        def _dial_one(node: dict) -> None:
             try:
                 ms = self.dial_fn(node) if self.dial_fn else None
             except Exception:
                 ms = None
             with self._lock:
                 node["real_latency_ms"] = ms
-                self.status["full_probe"]["done"] = i + 1
+                self.status["full_probe"]["done"] += 1
+
+        with ThreadPoolExecutor(max_workers=self.full_probe_workers) as executor:
+            list(executor.map(_dial_one, nodes))
         with self._lock:
             self._sync_probe_results(nodes)
             self.status["full_probe"]["state"] = "done"
@@ -2604,6 +2616,7 @@ def main() -> int:
         limit=cfg["limit"],
         real_topk=cfg["real_topk"],
         dial_workers=cfg["dial_workers"],
+        full_probe_workers=cfg["full_probe_workers"],
         health_check_interval=cfg["health_check_interval"],
         max_mux_connections=cfg["max_mux_connections"],
         vless_uuid=cfg["vless_uuid"],
