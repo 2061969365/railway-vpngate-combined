@@ -1152,6 +1152,40 @@ class PinnedHealthTests(unittest.TestCase):
             finally:
                 manager.stop()
 
+    def test_manual_death_rescues_to_best(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                with _fake_singbox():
+                    with mock.patch("railway_manager.probe_tcp_latency",
+                                     return_value=100):
+                        self.assertTrue(manager.refresh_once(
+                            fetcher=lambda url, timeout: _snapshot_csv(
+                                "203.0.113.11", "203.0.113.12",
+                                "203.0.113.13")))
+                    manager.switch(tag="vpngate-0")
+                    by_server = {n["server"]: n for n in manager._nodes}
+                    by_server["203.0.113.11"]["real_latency_ms"] = 70
+                    by_server["203.0.113.12"]["real_latency_ms"] = 30
+                    by_server["203.0.113.13"]["real_latency_ms"] = 50
+
+                    failing = lambda host, port, timeout=5: 0
+                    self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+                    self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+                    self.assertEqual("rescued", manager.check_pinned_health(probe_fn=failing))
+
+                self.assertEqual("vpngate-1", manager.preferred_tag)
+                self.assertEqual("vpngate-2", manager.backup_tag)
+                self.assertTrue(manager._auto_pinned)
+                written = _read_json(f"{tmpdir}/singbox.json")
+                chain = next(o for o in written["outbounds"] if o["tag"] == "chain")
+                self.assertEqual(["vpngate-1", "vpngate-2", "auto"],
+                                 chain["outbounds"])
+                events = [e["event"] for e in manager.status["refresh_history"]]
+                self.assertIn("auto-rescue", events)
+            finally:
+                manager.stop()
+
     def test_healthy_pinned_node_stays_pinned(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self._manager(tmpdir)
@@ -3285,6 +3319,27 @@ class AutoPinTests(unittest.TestCase):
 
         self.assertEqual("vpngate-1", manager.preferred_tag)
         self.assertIsNone(manager.backup_tag)
+
+    def test_auto_track_repins_to_new_best(self) -> None:
+        manager = self._manager()
+        try:
+            self._seed_nodes(manager, ("203.0.113.11", 100),
+                             ("203.0.113.12", 200))
+            self._run_probe(manager, lambda node: {"203.0.113.11": 60,
+                                                   "203.0.113.12": 50}[node["server"]])
+            self.assertEqual("vpngate-1", manager.preferred_tag)
+            self._run_probe(manager, lambda node: {"203.0.113.11": 30,
+                                                   "203.0.113.12": 80}[node["server"]])
+            written = _read_json(manager.config_path)
+            events = [e["event"] for e in manager.status["refresh_history"]]
+        finally:
+            manager.stop()
+
+        self.assertEqual("vpngate-0", manager.preferred_tag)
+        self.assertEqual("vpngate-1", manager.backup_tag)
+        chain = next(o for o in written["outbounds"] if o["tag"] == "chain")
+        self.assertEqual(["vpngate-0", "vpngate-1", "auto"], chain["outbounds"])
+        self.assertIn("auto-pin", events)
 
     def test_single_measured_pins_best_only(self) -> None:
         dial = lambda node: 40 if node["server"] == "203.0.113.11" else None
