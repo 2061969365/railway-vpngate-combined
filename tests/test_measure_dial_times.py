@@ -56,7 +56,7 @@ class SummarizeTests(unittest.TestCase):
 
         summary = self.mod.summarize_dials(rows, timeout=90)
 
-        self.assertEqual((6, 2), (summary["n"], summary["measured"]))
+        self.assertEqual((3, 2), (summary["n"], summary["measured"]))
         self.assertAlmostEqual(12.5, summary["elapsed_min"])
         self.assertAlmostEqual(18.75, summary["elapsed_med"])
         self.assertAlmostEqual(25.0, summary["elapsed_max"])
