@@ -844,5 +844,43 @@ class DialGateTests(unittest.TestCase):
         self.assertTrue(gate.release.called)
 
 
+class DualPinConfigTests(unittest.TestCase):
+    """chain selector with a backup: [best, second, auto]."""
+
+    def _two(self):
+        first = ovpn_to_endpoint(TCP_OVPN, tag="vpngate-0")
+        second = ovpn_to_endpoint(
+            TCP_OVPN.replace("203.0.113.1", "203.0.113.2"), tag="vpngate-1")
+        return [first, second]
+
+    def test_chain_with_backup_routes_best_second_auto(self) -> None:
+        cfg = build_singbox_config(self._two(), preferred="vpngate-0",
+                                   backup="vpngate-1")
+
+        self.assertEqual("chain", cfg["route"]["final"])
+        chain = next(o for o in cfg["outbounds"] if o["tag"] == "chain")
+        self.assertEqual(["vpngate-0", "vpngate-1", "auto"], chain["outbounds"])
+
+    def test_unknown_backup_falls_back(self) -> None:
+        cfg = build_singbox_config(self._two(), preferred="vpngate-0",
+                                   backup="vpngate-9")
+
+        chain = next(o for o in cfg["outbounds"] if o["tag"] == "chain")
+        self.assertEqual(["vpngate-0", "auto"], chain["outbounds"])
+
+    def test_backup_equal_to_preferred_falls_back(self) -> None:
+        cfg = build_singbox_config(self._two(), preferred="vpngate-0",
+                                   backup="vpngate-0")
+
+        chain = next(o for o in cfg["outbounds"] if o["tag"] == "chain")
+        self.assertEqual(["vpngate-0", "auto"], chain["outbounds"])
+
+    def test_no_backup_keeps_old_shape(self) -> None:
+        cfg = build_singbox_config(self._two(), preferred="vpngate-0")
+
+        chain = next(o for o in cfg["outbounds"] if o["tag"] == "chain")
+        self.assertEqual(["vpngate-0", "auto"], chain["outbounds"])
+
+
 if __name__ == "__main__":
     unittest.main()
