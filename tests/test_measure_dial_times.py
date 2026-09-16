@@ -1,5 +1,7 @@
 """Tests for scripts/measure_dial_times.py (dial elapsed instrumentation)."""
 import importlib.util
+import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -98,12 +100,17 @@ class RunTests(unittest.TestCase):
 
         old_snapshot, old_dial = mod.snapshot_to_nodes, mod.measure_real_latency
         mod.snapshot_to_nodes, mod.measure_real_latency = fake_snapshot, fake_dial
+        with tempfile.NamedTemporaryFile("w", suffix=".csv",
+                                         delete=False) as handle:
+            handle.write("placeholder")
+            csv_path = handle.name
         try:
-            code, markdown, rows = mod.run("csv", count=4, timeout=90,
+            code, markdown, rows = mod.run(csv_path, count=4, timeout=90,
                                            workers=2, limit=12,
                                            singbox_bin="sing-box")
         finally:
             mod.snapshot_to_nodes, mod.measure_real_latency = old_snapshot, old_dial
+            os.unlink(csv_path)
 
         self.assertEqual(0, code)
         self.assertEqual(4, len(rows))
@@ -111,7 +118,8 @@ class RunTests(unittest.TestCase):
         self.assertIn("4/4", markdown)
 
     def test_run_bad_csv_is_infra_error(self) -> None:
-        code, _, _ = self.mod.run("", count=4, timeout=90, workers=2,
+        code, _, _ = self.mod.run("/nonexistent-snapshot.csv", count=4,
+                                  timeout=90, workers=2,
                                   limit=12, singbox_bin="sing-box")
 
         self.assertEqual(1, code)
