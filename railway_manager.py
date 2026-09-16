@@ -1523,7 +1523,7 @@ class RailwayManager:
         admin_token: str | None = None,
         snapshot_url: str = DEFAULT_SNAPSHOT_URL,
         snapshot_urls: list | None = None,
-        refresh_seconds: int = 1200,
+        refresh_seconds: int = 3600,
         limit: int | None = 0,
         real_topk: int = 0,
         dial_fn=None,
