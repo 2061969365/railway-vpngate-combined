@@ -2422,6 +2422,7 @@ class RailwayManager:
         the serving config.
         """
         if not first_run:
+            self._record_history("auto-pin-skipped", "later cycle, measure-only")
             return
         measured = sorted(
             (n for n in nodes
@@ -2430,6 +2431,7 @@ class RailwayManager:
             key=lambda n: (n["real_latency_ms"],
                            (n.get("endpoint") or {}).get("tag") or ""))
         if not measured:
+            self._record_history("auto-pin-skipped", "nothing measured")
             return
         best = (measured[0].get("endpoint") or {}).get("tag")
         second = ((measured[1].get("endpoint") or {}).get("tag")
@@ -2437,9 +2439,14 @@ class RailwayManager:
         best_ms = measured[0]["real_latency_ms"]
         with self._lock:
             if self.preferred_tag is not None and not self._auto_pinned:
-                return
-            if (start_preferred is not None
+                skipped = "manual pin kept"
+            elif (start_preferred is not None
                     and self.preferred_tag != start_preferred):
+                skipped = f"switched mid-run to {self.preferred_tag}"
+            else:
+                skipped = ""
+            if skipped:
+                self._record_history("auto-pin-skipped", skipped)
                 return
             if self.preferred_tag is not None:
                 cur_ms = next(
@@ -2448,6 +2455,9 @@ class RailwayManager:
                      == self.preferred_tag),
                     None)
                 if cur_ms is not None and cur_ms <= best_ms:
+                    self._record_history(
+                        "auto-pin-skipped",
+                        f"current {self.preferred_tag} still best")
                     return
         if not self._apply_config(final="auto", preferred=best,
                                   backup=second):
@@ -2455,6 +2465,8 @@ class RailwayManager:
             return
         with self._lock:
             if self.preferred_tag is not None and not self._auto_pinned:
+                self._record_history("auto-pin-skipped",
+                                     "manual pin won the race")
                 return
             self.preferred_tag = best
             self.backup_tag = second
