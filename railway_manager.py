@@ -757,7 +757,7 @@ async function copySub(which, btn) {
 }
 async function copyAll(btn) {
   const sec = document.getElementById("sec-sub");
-  const text = [sec.dataset.direct, sec.dataset.chain].filter(Boolean).join("\n");
+  const text = [sec.dataset.direct, sec.dataset.chain].filter(Boolean).join(String.fromCharCode(10));
   if (!text) return;
   let ok = false;
   try {
