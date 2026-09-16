@@ -594,6 +594,15 @@ jobs:
           echo "direct exit IP never matched runner IP"; exit 1
       - name: Manual full probe via container API
         run: |
+          echo "waiting for any auto-started full probe to finish..."
+          for i in $(seq 1 120); do
+            curl -m 10 -s -H "Authorization: Bearer trial-admin-token-0123456789" \
+              http://127.0.0.1:3000/api/status -o /tmp/trial-wait.json
+            if python3 -c "import json;exit(0 if json.load(open('/tmp/trial-wait.json'))['full_probe']['state']!='running' else 1)"; then
+              echo "probe slot free after ~$((i * 5))s"; break
+            fi
+            sleep 5
+          done
           curl -m 10 -s -X POST -H "Authorization: Bearer trial-admin-token-0123456789" \
             http://127.0.0.1:3000/api/full_probe | grep -q '"accepted": true' || {
             echo "full_probe not accepted"; docker logs combined-trial 2>&1 | tail -n 20; exit 1; }
