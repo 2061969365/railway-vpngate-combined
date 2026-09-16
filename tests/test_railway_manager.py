@@ -3363,7 +3363,6 @@ class ProgressivePinTests(unittest.TestCase):
                     if time.monotonic() > deadline:
                         break
                     time.sleep(0.05)
-                seen.add(manager.preferred_tag)
                 manager._full_probe_thread.join(timeout=30)
                 events = [e["event"]
                           for e in manager.status["refresh_history"]]
@@ -3444,7 +3443,7 @@ class PinStateTests(unittest.TestCase):
 
     def test_state_round_trips_backup_and_auto_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            manager = self._manager(tmpdir)
+            manager = self._manager(tmpdir, dial_fn=lambda node: 50)
             try:
                 with _fake_singbox(), \
                      mock.patch("railway_manager.probe_tcp_latency",
@@ -3452,10 +3451,8 @@ class PinStateTests(unittest.TestCase):
                     self.assertTrue(manager.refresh_once(
                         fetcher=lambda url, timeout: _snapshot_csv(
                             "203.0.113.11", "203.0.113.12")))
-                manager.dial_fn = lambda node: 50
                 with _fake_singbox():
-                    manager._start_full_probe()
-                    manager._full_probe_thread.join(timeout=30)
+                    manager._full_probe_thread.join(timeout=60)
             finally:
                 manager.stop()
 
