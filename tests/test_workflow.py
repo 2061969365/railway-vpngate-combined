@@ -89,6 +89,10 @@ class FixVerificationTests(unittest.TestCase):
         self.assertIn("mux drain", self.text)
         self.assertIn("docker stop", self.text)
 
+    def test_settings_roundtrip_checks(self) -> None:
+        self.assertIn("/api/settings", self.text)
+        self.assertIn("settings.json", self.text)
+
     def test_dualpin_verification_step(self) -> None:
         self.assertIn("verify_dualpin", self.text)
         self.assertIn("backup", self.text)
