@@ -3455,8 +3455,11 @@ class PinStateTests(unittest.TestCase):
                     # background thread; join it inside the fake-singbox
                     # scope so its _apply_config sees the mocked check.
                     manager._full_probe_thread.join(timeout=60)
+                    probe_state = manager.status["full_probe"]["state"]
             finally:
                 manager.stop()
+
+            self.assertEqual("done", probe_state)
 
             reloaded = self._manager(tmpdir)
             try:
