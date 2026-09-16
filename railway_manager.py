@@ -2683,7 +2683,6 @@ class RailwayManager:
         best = (measured[0].get("endpoint") or {}).get("tag")
         second = ((measured[1].get("endpoint") or {}).get("tag")
                   if len(measured) > 1 else None)
-        best_ms = measured[0]["real_latency_ms"]
         with self._lock:
             if self.preferred_tag is not None and not self._auto_pinned:
                 skipped = "manual pin kept"
@@ -2696,15 +2695,12 @@ class RailwayManager:
                 self._record_history("auto-pin-skipped", skipped)
                 return
             if self.preferred_tag is not None:
-                cur_ms = next(
-                    (n["real_latency_ms"] for n in measured
-                     if (n.get("endpoint") or {}).get("tag")
-                     == self.preferred_tag),
-                    None)
-                if cur_ms is not None and cur_ms <= best_ms:
+                if (self.preferred_tag == best
+                        and self.backup_tag == second):
                     self._record_history(
                         "auto-pin-skipped",
-                        f"current {self.preferred_tag} still best")
+                        f"pins unchanged {best}"
+                        + (f"+{second}" if second else ""))
                     return
         if not self._apply_config(final="auto", preferred=best,
                                   backup=second):
