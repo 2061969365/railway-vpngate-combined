@@ -2853,8 +2853,14 @@ class AuditFixAConsoleTests(unittest.TestCase):
                          r'if \(isAbort\(e\)\) \{[^}]*setBusy\("btn-verify", false\)')
 
     def test_hero_uses_unfiltered_endpoints(self) -> None:
-        self.assertNotIn("|| eps[0]", UI_HTML)
-        self.assertIn("|| s.endpoints[0]", UI_HTML)
+        # preferredEp(s) is the single source: unfiltered s.endpoints,
+        # preferred first, first endpoint as fallback, never the
+        # filtered eps list.
+        start = UI_HTML.index("function preferredEp(")
+        block = UI_HTML[start:start + 400]
+        self.assertIn("s.preferred_tag", block)
+        self.assertIn("(s && s.endpoints) || []", block)
+        self.assertNotIn("eps[0]", block)
 
     def test_hero_labels_latency_source(self) -> None:
         self.assertIn("未真测", UI_HTML)
@@ -4528,7 +4534,143 @@ class SingleProbeWritebackTests(unittest.TestCase):
         self.assertIsNone(probe["error"])
 
 
-class VerifyRunningUiTests(unittest.TestCase):
+class ProbeWritebackFollowupsTests(unittest.TestCase):
+    """Follow-ups 1-3: appended rows seed first_seen, mid-dial refresh
+    lands on the live node, duplicate keys all update."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"/tmp/railway-pwf-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-pwf-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-pwf-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _post_json(self, manager, path, payload):
+        class FakeClient:
+            def __init__(self):
+                self.sent = b""
+
+            def recv(self, size):
+                return b""
+
+            def sendall(self, data):
+                self.sent += data
+
+        raw = json.dumps(payload).encode()
+        headers = (f"POST {path} HTTP/1.1\r\nContent-Length: {len(raw)}\r\n"
+                   f"Authorization: Bearer {self.TOKEN}\r\n")
+        client = FakeClient()
+        manager._handle_http(client, (headers + "\r\n").encode("latin-1") + raw)
+        head, _, body = client.sent.partition(b"\r\n\r\n")
+        return head.decode("latin-1").split("\r\n")[0], body
+
+    def _node(self, ip, i=0, tag=None):
+        return {"server": ip, "server_port": 443,
+                "country": "Japan", "country_short": "JP",
+                "latency_ms": 100, "real_latency_ms": None,
+                "speed": 1000,
+                "endpoint": {"tag": tag or f"vpngate-{i}", "server": ip,
+                             "server_port": 443}}
+
+    def test_appended_row_seeds_first_seen(self) -> None:
+        manager = self._manager(dial_fn=lambda node: 77)
+        try:
+            manager._nodes = [self._node("203.0.113.11")]
+            with manager._lock:
+                manager.status["endpoints"] = []
+            line, _ = self._post_json(manager, "/api/probe",
+                                      {"tag": "vpngate-0"})
+            self.assertIn("202", line)
+            manager._single_probe_thread.join(timeout=30)
+            with manager._lock:
+                first_seen = manager._first_seen.get("203.0.113.11:443")
+                shown = [ep for ep in manager.status["endpoints"]
+                         if ep.get("real_latency_ms") == 77]
+        finally:
+            manager.stop()
+
+        self.assertIsNotNone(first_seen)
+        self.assertEqual(1, len(shown))
+
+    def test_mid_dial_refresh_lands_on_live_node(self) -> None:
+        gate = threading.Event()
+
+        def _blocked_dial(node):
+            gate.wait(timeout=30)
+            return 66
+
+        manager = self._manager(dial_fn=_blocked_dial)
+        try:
+            manager._nodes = [self._node("203.0.113.11")]
+            with manager._lock:
+                manager.status["endpoints"] = []
+            line, _ = self._post_json(manager, "/api/probe",
+                                      {"tag": "vpngate-0"})
+            self.assertIn("202", line)
+            time.sleep(0.6)
+            replacement = self._node("203.0.113.11")
+            with manager._lock:
+                manager._nodes = [replacement]
+            gate.set()
+            manager._single_probe_thread.join(timeout=30)
+            live_ms = replacement["real_latency_ms"]
+            with manager._lock:
+                shown = [ep.get("real_latency_ms")
+                         for ep in manager.status["endpoints"]]
+        finally:
+            gate.set()
+            manager.stop()
+
+        self.assertEqual(66, live_ms)
+        self.assertIn(66, shown)
+
+    def test_duplicate_keys_all_update(self) -> None:
+        manager = self._manager(dial_fn=lambda node: 44)
+        try:
+            manager._nodes = [self._node("203.0.113.11")]
+            with manager._lock:
+                manager.status["endpoints"] = [
+                    {"tag": "vpngate-0", "server": "203.0.113.11",
+                     "server_port": 443, "country": "Japan",
+                     "country_short": "JP", "latency_ms": 100,
+                     "real_latency_ms": None, "speed": 1000},
+                    {"tag": "vpngate-7", "server": "203.0.113.11",
+                     "server_port": 443, "country": "Japan",
+                     "country_short": "JP", "latency_ms": 200,
+                     "real_latency_ms": None, "speed": 500}]
+            line, _ = self._post_json(manager, "/api/probe",
+                                      {"tag": "vpngate-0"})
+            self.assertIn("202", line)
+            manager._single_probe_thread.join(timeout=30)
+            with manager._lock:
+                values = [ep.get("real_latency_ms")
+                          for ep in manager.status["endpoints"]]
+        finally:
+            manager.stop()
+
+        self.assertEqual([44, 44], values)
+
+
+class PreferredEpUiTests(unittest.TestCase):
+    """Follow-up 4: one preferredEp(s) helper feeds renderAll and the
+    verify loop (no duplicated find-or-first, no half guard)."""
+
+    def test_preferred_ep_helper_present(self) -> None:
+        self.assertIn("function preferredEp(", UI_HTML)
+        start = UI_HTML.index("function preferredEp(")
+        block = UI_HTML[start:start + 400]
+        self.assertIn("s.preferred_tag", block)
+        self.assertIn("s.endpoints", block)
+        self.assertGreaterEqual(UI_HTML.count("preferredEp(s)"), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
     """Batch 4 (small items), console side: running verify reads as
     verifying (not unverified), and the verify loop passes context."""
 

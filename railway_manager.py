@@ -565,6 +565,7 @@ function fmtDur(sec) {
   return Math.floor(sec / 86400) + "d" + Math.floor(sec % 86400 / 3600) + "h";
 }
 function nodeQuery() { const el = document.getElementById("node-search"); return el ? el.value.trim().toLowerCase() : ""; }
+function preferredEp(s) { const all = (s && s.endpoints) || []; return all.find(e => e.tag === s.preferred_tag) || all[0]; }
 function sortVal(e) {
   if (sortKey === "country") return (e.country || "") + (e.tag || "");
   if (sortKey === "tag") return e.tag || "";
@@ -622,7 +623,7 @@ function renderAll(s) {
     }
     if (pendingTag && s.preferred_tag === pendingTag && !(s.probe && s.probe.state === "running")) pendingTag = null;
     const eps = filteredEndpoints(s);
-    const pref = s.endpoints.find(e => e.tag === s.preferred_tag) || s.endpoints[0];
+    const pref = preferredEp(s);
     document.getElementById("hero-kicker").innerHTML =
       (pref ? esc(pref.country_short) + "<br>" + (pref.real_latency_ms != null ? pref.real_latency_ms + "ms" : fmtMs(pref.latency_ms) + "·未真测") : "—<br>无节点");
     document.getElementById("hero-sub").textContent =
@@ -1169,7 +1170,7 @@ async function verifyExit() {
       if (my !== verifySeq) break;
       const s = await api("/api/status", "GET", null, sig);
       lastStatus = s;
-      const vp = (s.endpoints || []).find(e => e.tag === s.preferred_tag) || s.endpoints[0];
+      const vp = preferredEp(s);
       renderVerify(s.verify, vp);
       if (s.verify && s.verify.state === "done") {
         if (!s.verify.exit_ip) toast("验证未拿到出口 IP", true);
@@ -2780,20 +2781,23 @@ class RailwayManager:
             "auto-pin", best + (f" backup={second}" if second else ""))
 
     def _sync_probe_results(self, nodes: list[dict]) -> None:
-        by_key = {(ep.get("server"), ep.get("server_port")): ep
-                  for ep in self.status["endpoints"]}
+        by_key: dict = {}
+        for ep in self.status["endpoints"]:
+            by_key.setdefault((ep.get("server"), ep.get("server_port")), []).append(ep)
         used = {ep.get("tag") for ep in self.status["endpoints"]}
         counter = 0
         for node in nodes:
             key = (node.get("server"), node.get("server_port"))
             if key in by_key:
-                by_key[key]["real_latency_ms"] = node.get("real_latency_ms")
+                for ep in by_key[key]:
+                    ep["real_latency_ms"] = node.get("real_latency_ms")
                 continue
             while f"vpngate-{counter}" in used:
                 counter += 1
             tag = f"vpngate-{counter}"
             counter += 1
             used.add(tag)
+            self._first_seen.setdefault(f"{key[0]}:{key[1]}", _now_iso())
             entry = {"tag": tag, "server": node.get("server"),
                      "server_port": node.get("server_port"),
                      "country": node.get("country", ""),
@@ -2802,7 +2806,7 @@ class RailwayManager:
                      "real_latency_ms": node.get("real_latency_ms"),
                      "speed": node.get("speed", 0)}
             self.status["endpoints"].append(entry)
-            by_key[key] = entry
+            by_key[key] = [entry]
 
     @staticmethod
     def _running_fresh(state: dict, thread) -> bool:
@@ -2855,6 +2859,15 @@ class RailwayManager:
             ms = None
             error = f"{type(exc).__name__}: {exc}"
         with self._lock:
+            # Re-resolve the live node: a refresh may have rebound
+            # self._nodes mid-dial, leaving `node` detached. Writing the
+            # result onto the detached dict would fix the served table
+            # (via _sync_probe_results below) but leave auto-pin/switch
+            # health reads stale on the live entry.
+            live = next((n for n in self._nodes
+                         if (n.get("endpoint") or {}).get("tag") == tag),
+                        node)
+            live["real_latency_ms"] = ms
             node["real_latency_ms"] = ms
             # Same shared helper as the full probe: updates the served row
             # by key, appending when the endpoint list was rebuilt mid-dial
