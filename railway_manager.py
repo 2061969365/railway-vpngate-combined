@@ -2357,8 +2357,7 @@ class RailwayManager:
                 self._pinned_fail_streak = 0
                 return "pinned"
             self._pinned_fail_streak += 1
-            if self._pinned_fail_streak < PINNED_FAIL_THRESHOLD:
-                return "pinned"
+            streak = self._pinned_fail_streak
             rescue = self.auto_rescue
             measured = sorted(
                 (n for n in self._nodes
@@ -2372,7 +2371,37 @@ class RailwayManager:
                     if measured else None)
             second = ((measured[1].get("endpoint") or {}).get("tag")
                       if len(measured) > 1 else None)
-            self._pinned_fail_streak = 0
+            # Fast path: on the FIRST failed handshake, redial the pinned
+            # tunnel itself. A TCP handshake says nothing about tunnel
+            # health (dead tunnels keep answering 443), so a dead redial
+            # plus an alive measured backup rescues immediately instead
+            # of waiting out PINNED_FAIL_THRESHOLD strikes (~3 min dark).
+            fast_rescue = (streak == 1 and best is not None)
+            if streak < PINNED_FAIL_THRESHOLD and not fast_rescue:
+                return "pinned"
+            if not fast_rescue:
+                self._pinned_fail_streak = 0
+        # Everything below runs WITHOUT the lock: dial_fn may block ~20s
+        # and _apply_config's `sing-box check` may block ~30s; holding the
+        # lock here would stall /healthz and every /api/* handler.
+        if fast_rescue:
+            try:
+                redial_ms = self.dial_fn(node) if self.dial_fn else None
+            except Exception:
+                redial_ms = None
+            with self._lock:
+                node["real_latency_ms"] = redial_ms
+            if redial_ms is not None and redial_ms > 0:
+                with self._lock:
+                    self._pinned_fail_streak = 0
+                self._record_history("health-redial-ok",
+                                     f"{tag} handshake failed but tunnel redial ms={redial_ms}")
+                return "pinned"
+            with self._lock:
+                self._pinned_fail_streak = 0
+            self._record_history("health-redial-dead",
+                                 f"{tag} redial dead, fast rescue to {best}")
+        with self._lock:
             if best is None:
                 self.preferred_tag = None
                 self.backup_tag = None
@@ -2741,6 +2770,7 @@ class RailwayManager:
         best = (measured[0].get("endpoint") or {}).get("tag")
         second = ((measured[1].get("endpoint") or {}).get("tag")
                   if len(measured) > 1 else None)
+        best_node = measured[0]
         with self._lock:
             if self.preferred_tag is not None and not self._auto_pinned:
                 skipped = "manual pin kept"
@@ -2754,12 +2784,52 @@ class RailwayManager:
                 return
             if self.preferred_tag is not None:
                 if (self.preferred_tag == best
-                        and self.backup_tag == second):
+                        and self.backup_tag == second
+                        and best_node.get("real_latency_ms") is not None):
                     self._record_history(
                         "auto-pin-skipped",
                         f"pins unchanged {best}"
                         + (f"+{second}" if second else ""))
                     return
+                if (self.preferred_tag == best
+                        and self.backup_tag == second):
+                    self._record_history(
+                        "auto-pin-skipped",
+                        f"pins unchanged but {best} dead this round, reselecting")
+        # Verify the winner's exit IP before pinning it: a tunnel that
+        # dials but yields no exit IP must never become the serving pin.
+        # Walk the measured ranking until one yields an exit IP; none
+        # usable keeps the current pin instead of pinning a dead end.
+        pinned: str | None = None
+        pinned_second: str | None = None
+        verified_tags: list[str] = []
+        for i, candidate in enumerate(measured):
+            cand_tag = (candidate.get("endpoint") or {}).get("tag")
+            cand_ep = candidate.get("endpoint") or candidate
+            try:
+                exit_ip, _ms = self.verify_fn(cand_ep)
+            except Exception:
+                exit_ip = None
+            if exit_ip:
+                pinned = cand_tag
+                rest = [n for n in measured[i + 1:]
+                        if (n.get("endpoint") or {}).get("tag") != cand_tag]
+                pinned_second = (((rest[0].get("endpoint") or {}).get("tag"))
+                                 if rest else None)
+                break
+            verified_tags.append(cand_tag or "?")
+        if pinned is None:
+            self._record_history(
+                "auto-pin-skipped",
+                f"no exit ip from {len(measured)} measured "
+                f"({','.join(verified_tags)})")
+            return
+        best, second = pinned, pinned_second
+        if pinned != (measured[0].get("endpoint") or {}).get("tag"):
+            self._record_history(
+                "auto-pin-exit-skip",
+                f"{(measured[0].get('endpoint') or {}).get('tag')} "
+                f"has no exit ip, pinned {pinned}")
         if not self._apply_config(final="auto", preferred=best,
                                   backup=second):
             self._record_history("auto-pin-failed", best)

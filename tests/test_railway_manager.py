@@ -1143,9 +1143,11 @@ class PinnedHealthTests(unittest.TestCase):
                     manager.switch(tag="vpngate-0")
 
                     failing = lambda host, port, timeout=5: 0
-                    self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
-                    self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
-                    self.assertEqual("unpinned", manager.check_pinned_health(probe_fn=failing))
+                    with mock.patch.object(manager, "dial_fn",
+                                           return_value=None):
+                        self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+                        self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+                        self.assertEqual("unpinned", manager.check_pinned_health(probe_fn=failing))
 
                 self.assertIsNone(manager.preferred_tag)
                 written = _read_json(f"{tmpdir}/singbox.json")
@@ -1171,9 +1173,11 @@ class PinnedHealthTests(unittest.TestCase):
                     by_server["203.0.113.13"]["real_latency_ms"] = 50
 
                     failing = lambda host, port, timeout=5: 0
-                    self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
-                    self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
-                    self.assertEqual("rescued", manager.check_pinned_health(probe_fn=failing))
+                    # Dead tunnel: the first failed handshake redials and
+                    # fast-rescues immediately (no 3-strike wait).
+                    with mock.patch.object(manager, "dial_fn",
+                                           return_value=None):
+                        self.assertEqual("rescued", manager.check_pinned_health(probe_fn=failing))
 
                 self.assertEqual("vpngate-1", manager.preferred_tag)
                 self.assertEqual("vpngate-2", manager.backup_tag)
@@ -3261,7 +3265,11 @@ class AutoPinTests(unittest.TestCase):
 
     def _run_probe(self, manager, dial):
         manager.dial_fn = dial
-        with _fake_singbox():
+        # Auto-pin verifies exit IPs; unit tests stub it alive unless
+        # they patch verify_fn themselves for the exit-IP cases.
+        with _fake_singbox(), \
+             mock.patch.object(manager, "verify_fn",
+                               side_effect=lambda ep: ("9.9.9.9", 11)):
             self._post(manager, "/api/full_probe")
             manager._full_probe_thread.join(timeout=30)
 
@@ -3449,7 +3457,9 @@ class ProgressivePinTests(unittest.TestCase):
                               "server": f"203.0.113.1{i}",
                               "server_port": 443}}
                 for i in (1, 2, 3)]
-            with _fake_singbox():
+            with _fake_singbox(), \
+                 mock.patch.object(manager, "verify_fn",
+                                   side_effect=lambda ep: ("9.9.9.9", 11)):
                 self._post(manager, "/api/full_probe")
                 seen: set = set()
                 deadline = time.monotonic() + 20
@@ -3488,7 +3498,9 @@ class ProgressivePinTests(unittest.TestCase):
                               "server": f"203.0.113.1{i}",
                               "server_port": 443}}
                 for i in (1, 2)]
-            with _fake_singbox():
+            with _fake_singbox(), \
+                 mock.patch.object(manager, "verify_fn",
+                                   side_effect=lambda ep: ("9.9.9.9", 11)):
                 self._post(manager, "/api/full_probe")
                 manager._full_probe_thread.join(timeout=30)
                 auto_pin_calls = manager.preferred_tag
@@ -3538,7 +3550,8 @@ class PinStateTests(unittest.TestCase):
 
     def test_state_round_trips_backup_and_auto_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            manager = self._manager(tmpdir, dial_fn=lambda node: 50)
+            manager = self._manager(tmpdir, dial_fn=lambda node: 50,
+                                    verify_fn=lambda ep: ("9.9.9.9", 11))
             try:
                 with _fake_singbox(), \
                      mock.patch("railway_manager.probe_tcp_latency",
@@ -3876,9 +3889,11 @@ class AutoPinFlagTests(unittest.TestCase):
                     by_server["203.0.113.12"]["real_latency_ms"] = 30
 
                     failing = lambda host, port, timeout=5: 0
-                    self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
-                    self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
-                    self.assertEqual("unpinned", manager.check_pinned_health(probe_fn=failing))
+                    with mock.patch.object(manager, "dial_fn",
+                                           return_value=None):
+                        self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+                        self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+                        self.assertEqual("unpinned", manager.check_pinned_health(probe_fn=failing))
                 self.assertIsNone(manager.preferred_tag)
             finally:
                 manager.stop()
@@ -4001,7 +4016,7 @@ class VerifyAttributionTests(unittest.TestCase):
         self.assertIsNone(snap["exit_ip"])
 
     def test_auto_pin_resets_verify(self) -> None:
-        manager = self._manager()
+        manager = self._manager(verify_fn=lambda ep: ("9.9.9.9", 11))
         try:
             self._seed_nodes(manager, "203.0.113.11", "203.0.113.12")
             with manager._lock:
@@ -4031,9 +4046,9 @@ class VerifyAttributionTests(unittest.TestCase):
                                             "ms": 100, "via_tag": "vpngate-0",
                                             "error": None}
             failing = lambda host, port, timeout=5: 0
-            with _fake_singbox():
-                self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
-                self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+            with _fake_singbox(), \
+                 mock.patch.object(manager, "dial_fn", return_value=None):
+                # Dead tunnel redial: first failure fast-rescues.
                 result = manager.check_pinned_health(probe_fn=failing)
             snap = manager.status["verify"]
         finally:
@@ -4669,8 +4684,7 @@ class PreferredEpUiTests(unittest.TestCase):
         self.assertGreaterEqual(UI_HTML.count("preferredEp(s)"), 2)
 
 
-if __name__ == "__main__":
-    unittest.main()
+class VerifyRunningUiTests(unittest.TestCase):
     """Batch 4 (small items), console side: running verify reads as
     verifying (not unverified), and the verify loop passes context."""
 
@@ -4687,6 +4701,138 @@ if __name__ == "__main__":
 
     def test_verify_loop_passes_pref(self) -> None:
         self.assertIn("renderVerify(s.verify,", self._verify_block())
+
+
+class DeadPinTests(unittest.TestCase):
+    """A pinned node whose tunnel is dead must not stay pinned forever.
+
+    Covers the three chained root causes:
+    1. tie-keep must require the best node to be alive this round;
+    2. health check must redial (not just TCP-handshake) on failure;
+    3. auto-pin must verify the winner's exit IP before pinning.
+    """
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, tmpdir: str, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"{tmpdir}/singbox.json",
+                        nodes_path=f"{tmpdir}/nodes.json",
+                        state_path=f"{tmpdir}/state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _seed_nodes(self, manager, *specs):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": hand, "real_latency_ms": real,
+                           "speed": 1000,
+                           "endpoint": {"tag": f"vpngate-{i}", "server": ip,
+                                        "server_port": 443}}
+                          for i, (ip, hand, real) in enumerate(specs)]
+
+    def test_tie_keep_requires_alive_best(self) -> None:
+        """preferred == best but best measured None this round: must NOT
+        skip; the dead pin must be replaced by the alive node."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(
+                tmpdir, verify_fn=lambda ep: ("9.9.9.9", 11))
+            try:
+                self._seed_nodes(manager, ("203.0.113.11", 100, None),
+                                 ("203.0.113.12", 200, 40))
+                manager.preferred_tag = "vpngate-0"
+                manager.status["preferred_tag"] = "vpngate-0"
+                manager.backup_tag = "vpngate-1"
+                manager.status["backup_tag"] = "vpngate-1"
+                manager._auto_pinned = True
+                with _fake_singbox(), \
+                     mock.patch.object(manager, "_apply_config",
+                                       return_value=True) as apply_mock:
+                    manager._auto_pin_best(manager._nodes, "vpngate-0")
+                    events = [e["event"]
+                              for e in manager.status["refresh_history"]]
+            finally:
+                manager.stop()
+
+        self.assertEqual("vpngate-1", manager.preferred_tag)
+        apply_mock.assert_called_once()
+        self.assertFalse(any(e["event"] == "auto-pin-skipped" and
+                             "pins unchanged" in e.get("detail", "")
+                             for e in manager.status["refresh_history"]))
+
+    def test_health_failure_triggers_redial_and_fast_rescue(self) -> None:
+        """First failed handshake triggers a tunnel redial; redial dead
+        switches to the alive backup immediately (no 3-strike wait)."""
+        dial_calls: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(
+                tmpdir,
+                dial_fn=lambda node: dial_calls.append(node["server"]) or None)
+            try:
+                self._seed_nodes(manager, ("203.0.113.11", 100, 30),
+                                 ("203.0.113.12", 200, 40))
+                manager.preferred_tag = "vpngate-0"
+                manager.status["preferred_tag"] = "vpngate-0"
+                manager.backup_tag = "vpngate-1"
+                manager.status["backup_tag"] = "vpngate-1"
+                manager._auto_pinned = True
+                failing = lambda host, port, timeout=5: 0
+                with _fake_singbox():
+                    result = manager.check_pinned_health(probe_fn=failing)
+            finally:
+                manager.stop()
+
+        self.assertEqual("rescued", result)
+        self.assertEqual("vpngate-1", manager.preferred_tag)
+        self.assertIn("203.0.113.11", dial_calls)
+
+    def test_auto_pin_verifies_exit_ip_before_pinning(self) -> None:
+        """Winner with no exit IP is skipped in favor of the next
+        candidate; nothing pinnable leaves the pin untouched."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(
+                tmpdir,
+                verify_fn=lambda ep: (None, None)
+                if ep["server"] == "203.0.113.11" else ("9.9.9.12", 11))
+            try:
+                self._seed_nodes(manager, ("203.0.113.11", 100, 20),
+                                 ("203.0.113.12", 200, 40))
+                with _fake_singbox():
+                    manager._auto_pin_best(manager._nodes, None)
+                    events = [e["event"]
+                              for e in manager.status["refresh_history"]]
+            finally:
+                manager.stop()
+
+        self.assertEqual("vpngate-1", manager.preferred_tag)
+        self.assertIn("auto-pin", events)
+
+    def test_auto_pin_no_exit_ip_anywhere_keeps_pin(self) -> None:
+        """No candidate yields an exit IP: keep the current pin, record
+        the skip, do not rebuild the serving config."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir, verify_fn=lambda ep: (None, None))
+            try:
+                self._seed_nodes(manager, ("203.0.113.11", 100, 20),
+                                 ("203.0.113.12", 200, 40))
+                manager.preferred_tag = "vpngate-0"
+                manager.status["preferred_tag"] = "vpngate-0"
+                manager._auto_pinned = True
+                with _fake_singbox(), \
+                     mock.patch.object(manager, "_apply_config",
+                                       return_value=True) as apply_mock:
+                    manager._auto_pin_best(manager._nodes, "vpngate-0")
+                    events = [(e["event"], e.get("detail", ""))
+                              for e in manager.status["refresh_history"]]
+            finally:
+                manager.stop()
+
+        self.assertEqual("vpngate-0", manager.preferred_tag)
+        apply_mock.assert_not_called()
+        self.assertTrue(any(ev == "auto-pin-skipped" and "exit ip" in detail
+                            for ev, detail in events))
 
 
 if __name__ == "__main__":
