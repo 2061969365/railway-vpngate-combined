@@ -10,7 +10,29 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
+
+# Product records skipped candidates as:
+#   event=auto-pin-exit-skip detail="<tag> has no exit ip, pinned <tag>"
+_EXIT_SKIP_RE = re.compile(r"^(\S+) has no exit ip, pinned (\S+)$")
+
+
+def exit_skipped_tags(status: dict) -> set[str]:
+    """Tags the product claims have no exit IP (from refresh_history).
+
+    Evidence only ever defers the expectation (allows falling through
+    to the next measured candidate); it can never cover a pin that
+    contradicts it (checked separately in run()).
+    """
+    skipped: set[str] = set()
+    for entry in status.get("refresh_history", []) or []:
+        if entry.get("event") != "auto-pin-exit-skip":
+            continue
+        match = _EXIT_SKIP_RE.match(entry.get("detail", ""))
+        if match:
+            skipped.add(match.group(1))
+    return skipped
 
 
 def expected(status: dict) -> tuple[str | None, str | None]:
@@ -20,8 +42,11 @@ def expected(status: dict) -> tuple[str | None, str | None]:
         key=lambda e: (e["real_latency_ms"], e.get("tag") or ""))
     if not measured:
         return None, None
-    best = measured[0].get("tag")
-    second = measured[1].get("tag") if len(measured) > 1 else None
+    usable = [e for e in measured
+              if e.get("tag") not in exit_skipped_tags(status)]
+    pool = usable if usable else measured
+    best = pool[0].get("tag")
+    second = pool[1].get("tag") if len(pool) > 1 else None
     return best, second
 
 
@@ -33,12 +58,19 @@ def run(status: dict, config: dict) -> tuple[int, str]:
         return 1, "dualpin: no measured endpoints to pin\n"
     preferred = status.get("preferred_tag")
     backup = status.get("backup_tag")
+    skipped = exit_skipped_tags(status)
     lines.append(f"dualpin: measured best={best}"
-                 + (f" second={second}" if second else " (only one measured)"))
+                 + (f" second={second}" if second else " (only one measured)")
+                 + (f" exit-skipped=[{','.join(sorted(skipped))}]" if skipped else ""))
     if preferred != best:
         problems.append(f"preferred_tag={preferred} != best={best}")
     if backup != second:
         problems.append(f"backup_tag={backup} != second={second}")
+    # Events can only defer, never cover: a pin that contradicts the
+    # product's own skip evidence is always a failure.
+    for tag in (preferred, backup):
+        if tag is not None and tag in skipped:
+            problems.append(f"{tag} pinned despite exit-skip evidence")
     chain = next((o for o in config.get("outbounds", [])
                   if o.get("tag") == "chain"), None)
     want = [best] + ([second] if second else []) + ["auto"]
