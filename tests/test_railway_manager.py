@@ -263,7 +263,9 @@ class RefreshTests(unittest.TestCase):
         try:
             with mock.patch("railway_manager.subprocess.Popen") as popen, \
                  mock.patch.object(RailwayManager, "_check_config", return_value=True), \
-                 mock.patch("railway_manager.probe_tcp_latency", return_value=100):
+                 mock.patch("railway_manager.probe_tcp_latency", return_value=100), \
+                 mock.patch.object(manager, "verify_fn",
+                                   side_effect=lambda ep: ("9.9.9.9", 11)):
                 ok = manager.refresh_once(
                     fetcher=lambda url, timeout: _snapshot_csv("203.0.113.11", "203.0.113.12"))
         finally:
@@ -274,7 +276,11 @@ class RefreshTests(unittest.TestCase):
                          [ep["tag"] for ep in manager.status["endpoints"]])
         self.assertIsNotNone(manager.status["last_refresh"])
         self.assertIsNone(manager.status["last_error"])
-        popen.assert_called_once()
+        # One serving restart; the gated full probe may additionally dial
+        # (throwaway processes) but must never restart serving twice.
+        serving = [c for c in popen.call_args_list
+                   if "dial.json" not in str(c)]
+        self.assertEqual(1, len(serving))
 
     def test_refresh_failure_keeps_old_endpoints(self) -> None:
         manager = self._manager(retry_delays=(0, 0))
@@ -302,7 +308,9 @@ class RefreshTests(unittest.TestCase):
         manager = self._manager(real_topk=2, dial_fn=fake_dial)
         try:
             with mock.patch.object(RailwayManager, "_check_config", return_value=True), \
-                 mock.patch("railway_manager.probe_tcp_latency", return_value=100):
+                 mock.patch("railway_manager.probe_tcp_latency", return_value=100), \
+                 mock.patch.object(manager, "verify_fn",
+                                   side_effect=lambda ep: ("9.9.9.9", 11)):
                 ok = manager.refresh_once(
                     fetcher=lambda url, timeout: _snapshot_csv(
                         "203.0.113.11", "203.0.113.12", "203.0.113.13"))
@@ -312,9 +320,11 @@ class RefreshTests(unittest.TestCase):
         self.assertTrue(ok)
         servers = [ep["server"] for ep in manager.status["endpoints"]]
         reals = [ep["real_latency_ms"] for ep in manager.status["endpoints"]]
-        # handshake ties break by speed desc, so .13/.12 are dialed;
+        # handshake ties break by speed desc, so .13/.12 are dialed at
+        # refresh stage; the gated full probe then dials every node.
         # measured .12 sorts first and tags follow final order
-        self.assertEqual({"203.0.113.13", "203.0.113.12"}, set(dialed))
+        self.assertEqual({"203.0.113.13", "203.0.113.12", "203.0.113.11"},
+                         set(dialed))
         self.assertEqual(["203.0.113.12", "203.0.113.13", "203.0.113.11"], servers)
         self.assertEqual([50, None, None], reals)
 
@@ -3257,6 +3267,119 @@ class RefreshAutoProbeTests(unittest.TestCase):
 
         self.assertFalse(ok)
         starter.assert_not_called()
+
+
+class RefreshGateTests(unittest.TestCase):
+    """Refresh must not serve a pin until this round's full probe lands.
+
+    Root cause: refresh_once applied the config from stale pins (old
+    real_latency_ms, or None -> urltest blind pick), then kicked the
+    full probe to the background. The serving pin therefore described
+    last round's world, frequently a handshake-fast but tunnel-dead
+    node. The gate: refresh waits (bounded) for this round's full
+    probe to finish before applying the serving pin.
+    """
+
+    def _manager(self, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        config_path=f"/tmp/railway-rgate-{id(self)}.json",
+                        nodes_path=f"/tmp/railway-rgate-{id(self)}-nodes.json",
+                        state_path=f"/tmp/railway-rgate-{id(self)}-state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def test_refresh_waits_for_this_round_probe_before_pin(self) -> None:
+        """Stale real_latency 10 on vpngate-0, but this round it dials
+        None while vpngate-1 dials 40: the served pin must be vpngate-1,
+        never the stale vpngate-0.
+
+        real_topk=0 so the refresh-stage TopK dial cannot reveal the
+        death: only this round's full probe measures it. Without the
+        gate, refresh serves the stale vpngate-0 pin immediately (the
+        background probe only fixes it minutes later).
+
+        Asserted the moment refresh_once returns (no join): the gate
+        must have waited for this round's probe to land."""
+        manager = self._manager(
+            real_topk=0,
+            dial_fn=lambda node: None
+            if node["server"] == "203.0.113.11" else 40)
+        try:
+            manager._nodes = [{"server": "203.0.113.11", "server_port": 443,
+                               "country": "Japan", "country_short": "JP",
+                               "latency_ms": 20, "real_latency_ms": 10,
+                               "speed": 9000,
+                               "endpoint": {"tag": "vpngate-0",
+                                            "server": "203.0.113.11",
+                                            "server_port": 443}},
+                              {"server": "203.0.113.12", "server_port": 443,
+                               "country": "Japan", "country_short": "JP",
+                               "latency_ms": 300, "real_latency_ms": None,
+                               "speed": 100,
+                               "endpoint": {"tag": "vpngate-1",
+                                            "server": "203.0.113.12",
+                                            "server_port": 443}}]
+            manager.preferred_tag = "vpngate-0"
+            manager.status["preferred_tag"] = "vpngate-0"
+            manager._auto_pinned = True
+            with _fake_singbox(), \
+                 mock.patch("railway_manager.probe_tcp_latency",
+                            return_value=100), \
+                 mock.patch.object(manager, "verify_fn",
+                                   side_effect=lambda ep: ("9.9.9.9", 11)):
+                ok = manager.refresh_once(
+                    fetcher=lambda url, timeout: _snapshot_csv(
+                        "203.0.113.11", "203.0.113.12"))
+                pin_at_return = manager.preferred_tag
+            if manager._full_probe_thread is not None:
+                manager._full_probe_thread.join(timeout=60)
+        finally:
+            manager.stop()
+
+        self.assertTrue(ok)
+        self.assertEqual("vpngate-1", pin_at_return)
+
+    def test_refresh_probe_timeout_keeps_previous_pin(self) -> None:
+        """A wedged full probe must not wedge refresh forever: after the
+        bounded wait refresh keeps serving the previous pin.
+
+        Budget = ceil(1/5)*20 + 60 grace = 80s; the dial wedges 120s so
+        the gate must time out first."""
+        gate = threading.Event()
+        manager = self._manager(
+            dial_fn=lambda node: gate.wait(timeout=120) or 50)
+        try:
+            manager._nodes = [{"server": "203.0.113.11", "server_port": 443,
+                               "country": "Japan", "country_short": "JP",
+                               "latency_ms": 20, "real_latency_ms": 10,
+                               "speed": 9000,
+                               "endpoint": {"tag": "vpngate-0",
+                                            "server": "203.0.113.11",
+                                            "server_port": 443}}]
+            manager.preferred_tag = "vpngate-0"
+            manager.status["preferred_tag"] = "vpngate-0"
+            manager._auto_pinned = True
+            with _fake_singbox(), \
+                 mock.patch("railway_manager.probe_tcp_latency",
+                            return_value=100):
+                t0 = time.monotonic()
+                ok = manager.refresh_once(
+                    fetcher=lambda url, timeout: _snapshot_csv(
+                        "203.0.113.11"))
+                dt = time.monotonic() - t0
+            gate.set()
+            if manager._full_probe_thread is not None:
+                manager._full_probe_thread.join(timeout=60)
+        finally:
+            gate.set()
+            manager.stop()
+
+        self.assertTrue(ok)
+        self.assertEqual("vpngate-0", manager.preferred_tag)
+        # Bounded: must return on the ~80s gate budget, well before the
+        # 120s dial wedge releases.
+        self.assertLess(dt, 100)
 
 
 class AutoPinTests(unittest.TestCase):

@@ -19,6 +19,7 @@ Outbound traffic leaves through sing-box openvpn-client endpoints
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import secrets
@@ -60,6 +61,9 @@ SUPERVISE_INTERVAL = 10
 # Cap exit-IP verification during auto-pin: each candidate may block
 # ~dial_timeout, so only the head of the ranking is verified per run.
 EXIT_VERIFY_CAP = 5
+# Extra grace on top of the estimated full-probe duration when refresh
+# waits for this round's probe before serving the pin.
+REFRESH_PROBE_GRACE = 60.0
 # Runtime-tunable settings (console /api/settings; settings.json overrides
 # env on boot). Bounds are enforced on POST; out-of-range is a 400.
 SETTINGS_SPEC: dict = {
@@ -2660,10 +2664,39 @@ class RailwayManager:
         effective = "chain" if preferred else "auto"
         self._record_history("refresh-ok", f"{len(endpoints)} endpoints, final={effective}")
         print(f"refreshed {len(endpoints)} endpoints, final={effective}", flush=True)
-        # Every successful refresh (boot, periodic, manual) kicks off a
-        # background full probe; single-flight skips when one runs already.
-        self._start_full_probe()
+        # Gate: every successful refresh (boot, periodic, manual) kicks
+        # off a full probe AND waits (bounded) for this round's probe to
+        # land before returning, so the serving pin always describes this
+        # round's measurements — never last round's stale values or a
+        # handshake-only blind pick. A wedged probe must not wedge
+        # refresh: on timeout refresh keeps the previous pin and the
+        # background probe pins whenever it finishes.
+        if self._start_full_probe():
+            self._wait_for_this_round_probe()
         return True
+
+    def _wait_for_this_round_probe(self) -> bool:
+        """Join this round's full-probe thread within a bounded budget.
+
+        Budget = estimated probe duration (nodes / workers x timeout)
+        + REFRESH_PROBE_GRACE. Returns True when the probe landed in
+        time, False on timeout (previous pin kept, background thread
+        still pins on completion).
+        """
+        thread = self._full_probe_thread
+        if thread is None:
+            return True
+        with self._lock:
+            total = max(1, len(self._nodes))
+            workers = max(1, self.full_probe_workers)
+            dial_timeout = self.dial_timeout
+        budget = math.ceil(total / workers) * dial_timeout + REFRESH_PROBE_GRACE
+        thread.join(timeout=budget)
+        landed = not thread.is_alive()
+        if not landed:
+            self._record_history("refresh-probe-timeout",
+                                 f"probe still running after {budget:.0f}s, kept previous pin")
+        return landed
 
     def _refresh_failed(self, reason: str) -> bool:
         with self._lock:
