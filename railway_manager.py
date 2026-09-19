@@ -1664,6 +1664,7 @@ class RailwayManager:
         self._cpu_last: tuple[int, int] | None = None
         self._fail_streak = 0
         self._pinned_fail_streak = 0
+        self._rescue_round = 0
         self._crash_streak = 0
         self._retry_after = 0.0
         self._lock = threading.RLock()
@@ -2352,6 +2353,8 @@ class RailwayManager:
             tag = self.preferred_tag
             node = next((n for n in self._nodes
                          if n.get("endpoint", {}).get("tag") == tag), None) if tag else None
+            self._rescue_round += 1
+            round_id = self._rescue_round
         if tag is None or node is None:
             return "no-preferred"
         check = probe_fn if probe_fn is not None else probe_tcp_latency
@@ -2426,14 +2429,25 @@ class RailwayManager:
         if not self._apply_config(final="auto", preferred=best,
                                   backup=second):
             return "pinned"
+        if not self._commit_rescue(round_id, best, second):
+            return "pinned"
+        self._invalidate_verify(f"rescued to {best}")
+        self._record_history(
+            "auto-rescue",
+            f"{tag} failed {PINNED_FAIL_THRESHOLD}x, rescued to {best}"
+            + (f" backup={second}" if second else ""))
+        return "rescued"
+
+    def _commit_rescue(self, round_id: int, best: str | None,
+                       second: str | None) -> bool:
+        """Commit a rescue pin iff no manual switch landed after
+        this round started. Round-scoped (not a bare auto_pinned
+        flag, which would never rescue manual pins at all)."""
         with self._lock:
-            # A manual switch racing the slow redial+apply above must win:
-            # never clobber a pin the operator (or another thread) set
-            # after this rescue round started.
-            if self.preferred_tag is not None and not self._auto_pinned:
+            if self._rescue_round != round_id:
                 self._record_history("auto-pin-skipped",
-                                     "manual pin won the race")
-                return "pinned"
+                                     "manual switch won the race")
+                return False
             self.preferred_tag = best
             self.backup_tag = second
             self._auto_pinned = True
@@ -2441,12 +2455,7 @@ class RailwayManager:
             self.status["backup_tag"] = second
             self.status["auto_pinned"] = True
             self._persist_state()
-        self._invalidate_verify(f"rescued to {best}")
-        self._record_history(
-            "auto-rescue",
-            f"{tag} failed {PINNED_FAIL_THRESHOLD}x, rescued to {best}"
-            + (f" backup={second}" if second else ""))
-        return "rescued"
+            return True
 
     def switch(self, tag: str | None = None, country: str | None = None) -> tuple[bool, str]:
         with self._lock:
@@ -2489,6 +2498,7 @@ class RailwayManager:
             self.status["preferred_tag"] = target
             self.status["backup_tag"] = None
             self.status["auto_pinned"] = False
+            self._rescue_round += 1
             self._persist_state()
         if old != target:
             self._invalidate_verify(f"pin-changed to {target}")
@@ -2832,24 +2842,29 @@ class RailwayManager:
             if skipped:
                 self._record_history("auto-pin-skipped", skipped)
                 return
-            if self.preferred_tag is not None:
-                if (self.preferred_tag == best
-                        and self.backup_tag == second
-                        and best_node.get("real_latency_ms") is not None):
-                    self._record_history(
-                        "auto-pin-skipped",
-                        f"pins unchanged {best}"
-                        + (f"+{second}" if second else ""))
-                    return
-                if (self.preferred_tag == best
-                        and self.backup_tag == second):
-                    # Defensive-only: the measured[] filter above already
-                    # excludes real_latency_ms=None, so best_node is alive
-                    # here by construction. Kept so a future filter change
-                    # can never silently keep a dead pin.
-                    self._record_history(
-                        "auto-pin-skipped",
-                        f"pins unchanged but {best} dead this round, reselecting")
+            tie = (self.preferred_tag is not None
+                   and self.preferred_tag == best
+                   and self.backup_tag == second
+                   and best_node.get("real_latency_ms") is not None)
+        if tie:
+            # N1: even on a tie the best must still prove its exit
+            # IP once per round (a tunnel that dials but lost its
+            # exit must not be kept forever). Exactly one best-only
+            # check; failure falls through to the reselect below.
+            best_ep = best_node.get("endpoint") or best_node
+            try:
+                tie_ip, _ms = self.verify_fn(best_ep)
+            except Exception:
+                tie_ip = None
+            if tie_ip:
+                self._record_history(
+                    "auto-pin-skipped",
+                    f"pins unchanged {best}"
+                    + (f"+{second}" if second else ""))
+                return
+            self._record_history(
+                "auto-pin-skipped",
+                f"pins unchanged but {best} lost its exit ip, reselecting")
         # Verify the winner's exit IP before pinning it: a tunnel that
         # dials but yields no exit IP must never become the serving pin.
         # Walk the measured ranking until one yields an exit IP; none

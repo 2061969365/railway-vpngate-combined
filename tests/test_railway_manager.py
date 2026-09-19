@@ -1165,10 +1165,10 @@ class PinnedHealthTests(unittest.TestCase):
             finally:
                 manager.stop()
 
-    def test_manual_pin_never_clobbered_by_rescue(self) -> None:
-        """A manual pin stays manual even when its tunnel is dead: the
-        rescue path must yield to the operator-held pin (manual-race
-        guard). Fast rescue still fires for auto pins (next test)."""
+    def test_manual_pin_rescued_without_mid_round_switch(self) -> None:
+        """A manual pin with NO mid-round switch is rescued when its
+        tunnel is dead (round-scoped guard only yields to a switch that
+        lands after the round started; the next test covers that)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self._manager(tmpdir)
             try:
@@ -1188,16 +1188,18 @@ class PinnedHealthTests(unittest.TestCase):
                     failing = lambda host, port, timeout=5: 0
                     # Dead tunnel: the first failed handshake redials and
                     # fast-rescues immediately (no 3-strike wait). The
-                    # rescue path commits under the manual-race guard, so
-                    # a manual pin must stay manual here.
+                    # rescue path commits under the round-scoped guard, so
+                    # a manual pin with no mid-round switch is rescued
+                    # (operator can see auto-rescue in history and switch
+                    # back); only a switch AFTER the round started wins.
                     with mock.patch.object(manager, "dial_fn",
                                            return_value=None):
-                        self.assertEqual("pinned", manager.check_pinned_health(probe_fn=failing))
+                        self.assertEqual("rescued", manager.check_pinned_health(probe_fn=failing))
 
-                self.assertEqual("vpngate-0", manager.preferred_tag)
-                self.assertFalse(manager._auto_pinned)
+                self.assertEqual("vpngate-1", manager.preferred_tag)
+                self.assertTrue(manager._auto_pinned)
                 events = [e["event"] for e in manager.status["refresh_history"]]
-                self.assertNotIn("auto-rescue", events)
+                self.assertIn("auto-rescue", events)
             finally:
                 manager.stop()
 
@@ -4957,7 +4959,11 @@ class DeadPinTests(unittest.TestCase):
 
     def test_rescue_yields_to_manual_switch_mid_run(self) -> None:
         """A manual switch racing a slow redial+apply must win: the
-        rescue commits nothing and reports the pin as kept."""
+        rescue commits nothing and reports the pin as kept.
+
+        Simulates the race deterministically: _commit_rescue is hooked
+        so a real switch() lands between _apply_config and the commit
+        (bumping _rescue_round), making the in-flight round stale."""
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self._manager(tmpdir, dial_fn=lambda node: None)
             try:
@@ -4970,22 +4976,23 @@ class DeadPinTests(unittest.TestCase):
                 manager._auto_pinned = True
                 failing = lambda host, port, timeout=5: 0
 
-                real_apply = manager._apply_config
+                real_commit = manager._commit_rescue
 
-                def _apply_then_manual(**kwargs):
-                    manager.preferred_tag = "vpngate-9"
-                    manager._auto_pinned = False
-                    return real_apply(**kwargs)
+                def _commit_then_manual(round_id, best, second):
+                    ok, _ = manager.switch(tag="vpngate-1")
+                    assert ok
+                    return real_commit(round_id, best, second)
 
                 with _fake_singbox(), \
-                     mock.patch.object(manager, "_apply_config",
-                                       side_effect=_apply_then_manual):
+                     mock.patch.object(manager, "_commit_rescue",
+                                       side_effect=_commit_then_manual):
                     result = manager.check_pinned_health(probe_fn=failing)
             finally:
                 manager.stop()
 
         self.assertEqual("pinned", result)
-        self.assertEqual("vpngate-9", manager.preferred_tag)
+        self.assertEqual("vpngate-1", manager.preferred_tag)
+        self.assertFalse(manager._auto_pinned)
 
     def test_auto_pin_verifies_exit_ip_before_pinning(self) -> None:
         """Winner with no exit IP is skipped in favor of the next
@@ -5032,6 +5039,156 @@ class DeadPinTests(unittest.TestCase):
         apply_mock.assert_not_called()
         self.assertTrue(any(ev == "auto-pin-skipped" and "exit ip" in detail
                             for ev, detail in events))
+
+    def test_tie_keep_reverifies_best_exit_ip(self) -> None:
+        """Pins unchanged but best must still prove its exit IP: best
+        lost its exit this round -> reselect to the alive backup."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(
+                tmpdir,
+                verify_fn=lambda ep: (None, None)
+                if ep["server"] == "203.0.113.11" else ("9.9.9.12", 11))
+            try:
+                self._seed_nodes(manager, ("203.0.113.11", 100, 20),
+                                 ("203.0.113.12", 200, 40))
+                manager.preferred_tag = "vpngate-0"
+                manager.status["preferred_tag"] = "vpngate-0"
+                manager.backup_tag = "vpngate-1"
+                manager.status["backup_tag"] = "vpngate-1"
+                manager._auto_pinned = True
+                with _fake_singbox(), \
+                     mock.patch.object(manager, "_apply_config",
+                                       return_value=True):
+                    manager._auto_pin_best(manager._nodes, "vpngate-0")
+            finally:
+                manager.stop()
+
+        self.assertEqual("vpngate-1", manager.preferred_tag)
+
+    def test_tie_keep_exit_ok_skips_without_flap(self) -> None:
+        """Pins unchanged and best still yields an exit IP: skip with
+        exactly one best-only verification, no config rewrite."""
+        verify_calls: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            def _verify(ep):
+                verify_calls.append(ep["server"])
+                return ("9.9.9.9", 11)
+
+            manager = self._manager(tmpdir, verify_fn=_verify)
+            try:
+                self._seed_nodes(manager, ("203.0.113.11", 100, 20),
+                                 ("203.0.113.12", 200, 40))
+                manager.preferred_tag = "vpngate-0"
+                manager.status["preferred_tag"] = "vpngate-0"
+                manager.backup_tag = "vpngate-1"
+                manager.status["backup_tag"] = "vpngate-1"
+                manager._auto_pinned = True
+                with _fake_singbox(), \
+                     mock.patch.object(manager, "_apply_config",
+                                       return_value=True) as apply_mock:
+                    manager._auto_pin_best(manager._nodes, "vpngate-0")
+                    events = [e["event"]
+                              for e in manager.status["refresh_history"]]
+            finally:
+                manager.stop()
+
+        self.assertEqual("vpngate-0", manager.preferred_tag)
+        self.assertEqual(["203.0.113.11"], verify_calls)
+        apply_mock.assert_not_called()
+        self.assertIn("auto-pin-skipped", events)
+
+
+class RescueRoundTests(unittest.TestCase):
+    """check_pinned_health rescue commits only when no manual switch
+    landed after the round started (N3: round-scoped guard, not a bare
+    auto_pinned flag which would never rescue manual pins)."""
+
+    TOKEN = "test-admin-token-0123456789abcdef"
+
+    def _manager(self, tmpdir: str, **kwargs):
+        defaults = dict(port=0, mixed_port=get_free_port(), start_singbox=False,
+                        auto_refresh=False, fetch_on_start=False,
+                        admin_token=self.TOKEN,
+                        config_path=f"{tmpdir}/singbox.json",
+                        nodes_path=f"{tmpdir}/nodes.json",
+                        state_path=f"{tmpdir}/state.json")
+        defaults.update(kwargs)
+        return RailwayManager(**defaults)
+
+    def _seed_nodes(self, manager, *specs):
+        manager._nodes = [{"server": ip, "server_port": 443,
+                           "country": "Japan", "country_short": "JP",
+                           "latency_ms": hand, "real_latency_ms": real,
+                           "speed": 1000,
+                           "endpoint": {"tag": f"vpngate-{i}", "server": ip,
+                                        "server_port": 443}}
+                          for i, (ip, hand, real) in enumerate(specs)]
+
+    def _round_id(self, manager) -> int:
+        with manager._lock:
+            return manager._rescue_round
+
+    def test_rescue_round_increments_per_check(self) -> None:
+        """Each health check opens a new round id (monotonic)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                self._seed_nodes(manager, ("203.0.113.11", 100, 30))
+                first = self._round_id(manager)
+                manager.check_pinned_health(
+                    probe_fn=lambda host, port, timeout=5: 120)
+                second = self._round_id(manager)
+            finally:
+                manager.stop()
+
+        self.assertEqual(first + 1, second)
+
+    def test_rescue_after_fresh_manual_switch_yields(self) -> None:
+        """Manual switch AFTER the rescue round started wins: rescue
+        commits nothing."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir, dial_fn=lambda node: None)
+            try:
+                self._seed_nodes(manager, ("203.0.113.11", 100, 30),
+                                 ("203.0.113.12", 200, 40))
+                manager.preferred_tag = "vpngate-0"
+                manager.status["preferred_tag"] = "vpngate-0"
+                manager._auto_pinned = False
+                failing = lambda host, port, timeout=5: 0
+                with _fake_singbox():
+                    # Capture the round id the check will use, then
+                    # switch before the commit: stale round must yield.
+                    round_at_start = self._round_id(manager)
+                    result = manager.check_pinned_health(probe_fn=failing)
+                    self.assertEqual("rescued", result)
+                    manager.switch(tag="vpngate-0")
+                    committed = manager._commit_rescue(
+                        round_at_start, "vpngate-1", "vpngate-0")
+            finally:
+                manager.stop()
+
+        self.assertFalse(committed)
+        self.assertEqual("vpngate-0", manager.preferred_tag)
+
+    def test_rescue_without_mid_round_switch_commits(self) -> None:
+        """No mid-round switch: the same commit path applies the rescue."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(tmpdir)
+            try:
+                self._seed_nodes(manager, ("203.0.113.11", 100, 30),
+                                 ("203.0.113.12", 200, 40))
+                with manager._lock:
+                    round_id = manager._rescue_round
+                with _fake_singbox():
+                    committed = manager._commit_rescue(
+                        round_id, "vpngate-1", "vpngate-0")
+            finally:
+                manager.stop()
+
+        self.assertTrue(committed)
+        self.assertEqual("vpngate-1", manager.preferred_tag)
+        self.assertEqual("vpngate-0", manager.backup_tag)
+        self.assertTrue(manager._auto_pinned)
 
 
 if __name__ == "__main__":
