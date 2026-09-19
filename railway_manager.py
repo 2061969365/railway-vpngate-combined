@@ -2673,12 +2673,17 @@ class RailwayManager:
         # background probe pins whenever it finishes.
         if self._start_full_probe():
             self._wait_for_this_round_probe()
+        else:
+            self._record_history("refresh-probe-skipped",
+                                 "another probe already running, kept previous pin")
         return True
 
     def _wait_for_this_round_probe(self) -> bool:
         """Join this round's full-probe thread within a bounded budget.
 
         Budget = estimated probe duration (nodes / workers x timeout)
+        + exit-IP verification head (EXIT_VERIFY_CAP x timeout, same
+        worker thread runs _auto_pin_best after the dials)
         + REFRESH_PROBE_GRACE. Returns True when the probe landed in
         time, False on timeout (previous pin kept, background thread
         still pins on completion).
@@ -2690,7 +2695,9 @@ class RailwayManager:
             total = max(1, len(self._nodes))
             workers = max(1, self.full_probe_workers)
             dial_timeout = self.dial_timeout
-        budget = math.ceil(total / workers) * dial_timeout + REFRESH_PROBE_GRACE
+        budget = (math.ceil(total / workers) * dial_timeout
+                  + EXIT_VERIFY_CAP * dial_timeout
+                  + REFRESH_PROBE_GRACE)
         thread.join(timeout=budget)
         landed = not thread.is_alive()
         if not landed:

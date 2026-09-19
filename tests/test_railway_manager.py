@@ -3344,11 +3344,11 @@ class RefreshGateTests(unittest.TestCase):
         """A wedged full probe must not wedge refresh forever: after the
         bounded wait refresh keeps serving the previous pin.
 
-        Budget = ceil(1/5)*20 + 60 grace = 80s; the dial wedges 120s so
-        the gate must time out first."""
+        Budget = ceil(1/5)*20 dial + 5*20 verify head + 60 grace = 180s;
+        the dial wedges 300s so the gate must time out first."""
         gate = threading.Event()
         manager = self._manager(
-            dial_fn=lambda node: gate.wait(timeout=120) or 50)
+            dial_fn=lambda node: gate.wait(timeout=300) or 50)
         try:
             manager._nodes = [{"server": "203.0.113.11", "server_port": 443,
                                "country": "Japan", "country_short": "JP",
@@ -3377,9 +3377,9 @@ class RefreshGateTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual("vpngate-0", manager.preferred_tag)
-        # Bounded: must return on the ~80s gate budget, well before the
-        # 120s dial wedge releases.
-        self.assertLess(dt, 100)
+        # Bounded: must return on the ~180s gate budget, well before the
+        # 300s dial wedge releases.
+        self.assertLess(dt, 260)
 
 
 class AutoPinTests(unittest.TestCase):
