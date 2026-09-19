@@ -16,6 +16,11 @@ import sys
 # Product records skipped candidates as:
 #   event=auto-pin-exit-skip detail="<tag> has no exit ip, pinned <tag>"
 _EXIT_SKIP_RE = re.compile(r"^(\S+) has no exit ip, pinned (\S+)$")
+# Lenient fallback when no exit-skip evidence survived (history holds
+# only the last 20 events; trial snapshots may miss it): serving pins
+# must still sit inside the measured head, so an arbitrary pin can
+# never sneak through.
+RANKED_FALLBACK_HEAD = 5
 
 
 def exit_skipped_tags(status: dict) -> set[str]:
@@ -50,6 +55,15 @@ def expected(status: dict) -> tuple[str | None, str | None]:
     return best, second
 
 
+def ranked_tags(status: dict, head: int = RANKED_FALLBACK_HEAD) -> list[str]:
+    """Measured tags, fastest first, truncated to the head window."""
+    measured = sorted(
+        (e for e in status.get("endpoints", [])
+         if e.get("real_latency_ms") is not None and e.get("tag")),
+        key=lambda e: (e["real_latency_ms"], e.get("tag") or ""))
+    return [e.get("tag") for e in measured[:head]]
+
+
 def run(status: dict, config: dict) -> tuple[int, str]:
     lines: list[str] = []
     problems: list[str] = []
@@ -71,9 +85,27 @@ def run(status: dict, config: dict) -> tuple[int, str]:
     for tag in (preferred, backup):
         if tag is not None and tag in skipped:
             problems.append(f"{tag} pinned despite exit-skip evidence")
+    if problems and not skipped:
+        # No evidence survived (truncated history): allow serving pins
+        # that sit inside the measured head — an N1 tie-keep exit
+        # re-verify (or any exit gate) may have deferred past the raw
+        # top-2 without leaving an event. Still require distinct,
+        # measured pins (never unmeasured, never the same tag twice)
+        # and say so explicitly in the report.
+        ranked = ranked_tags(status)
+        if (preferred in ranked and (backup or None) in ranked
+                and preferred != backup):
+            lines.append(
+                "dualpin fallback: no exit-skip events; serving pins "
+                f"{preferred}+{backup} inside measured head "
+                f"[{','.join(ranked)}]")
+            problems = []
     chain = next((o for o in config.get("outbounds", [])
                   if o.get("tag") == "chain"), None)
-    want = [best] + ([second] if second else []) + ["auto"]
+    fallback = any("dualpin fallback" in line for line in lines)
+    want = ([preferred] + ([backup] if backup else []) + ["auto"]
+            if fallback
+            else [best] + ([second] if second else []) + ["auto"])
     if config.get("route", {}).get("final") != "chain":
         problems.append(
             f'route.final={config.get("route", {}).get("final")} != "chain"')
