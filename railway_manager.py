@@ -57,6 +57,9 @@ STALE_RUNNING_AFTER = 180.0
 HEALTH_CHECK_INTERVAL = 20
 PINNED_FAIL_THRESHOLD = 3
 SUPERVISE_INTERVAL = 10
+# Cap exit-IP verification during auto-pin: each candidate may block
+# ~dial_timeout, so only the head of the ranking is verified per run.
+EXIT_VERIFY_CAP = 5
 # Runtime-tunable settings (console /api/settings; settings.json overrides
 # env on boot). Bounds are enforced on POST; out-of-range is a 400.
 SETTINGS_SPEC: dict = {
@@ -2420,6 +2423,13 @@ class RailwayManager:
                                   backup=second):
             return "pinned"
         with self._lock:
+            # A manual switch racing the slow redial+apply above must win:
+            # never clobber a pin the operator (or another thread) set
+            # after this rescue round started.
+            if self.preferred_tag is not None and not self._auto_pinned:
+                self._record_history("auto-pin-skipped",
+                                     "manual pin won the race")
+                return "pinned"
             self.preferred_tag = best
             self.backup_tag = second
             self._auto_pinned = True
@@ -2793,6 +2803,10 @@ class RailwayManager:
                     return
                 if (self.preferred_tag == best
                         and self.backup_tag == second):
+                    # Defensive-only: the measured[] filter above already
+                    # excludes real_latency_ms=None, so best_node is alive
+                    # here by construction. Kept so a future filter change
+                    # can never silently keep a dead pin.
                     self._record_history(
                         "auto-pin-skipped",
                         f"pins unchanged but {best} dead this round, reselecting")
@@ -2800,10 +2814,13 @@ class RailwayManager:
         # dials but yields no exit IP must never become the serving pin.
         # Walk the measured ranking until one yields an exit IP; none
         # usable keeps the current pin instead of pinning a dead end.
+        # Bounded to the first few candidates: each verify_fn may block
+        # ~dial_timeout, and the tail of a large dead pool is never worth
+        # the wait (next full probe re-ranks anyway).
         pinned: str | None = None
         pinned_second: str | None = None
         verified_tags: list[str] = []
-        for i, candidate in enumerate(measured):
+        for i, candidate in enumerate(measured[:EXIT_VERIFY_CAP]):
             cand_tag = (candidate.get("endpoint") or {}).get("tag")
             cand_ep = candidate.get("endpoint") or candidate
             try:
