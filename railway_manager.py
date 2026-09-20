@@ -49,6 +49,7 @@ SETTINGS_SPEC: dict = {
     "dial_workers": {"type": "int", "min": 1, "max": 5},
     "full_probe_workers": {"type": "int", "min": 1, "max": 5},
     "probe_workers": {"type": "int", "min": 5, "max": 30},
+    "auto_repin": {"type": "bool"},
     "auto_rescue": {"type": "bool"},
 }
 def _int_env(env: dict, name: str, default: int, min_val: int | None = None, max_val: int | None = None) -> int:
@@ -407,7 +408,7 @@ html[data-theme="light"] :focus-visible{outline-color:#1a73e8}
 <div class="setgrid">
 <label>刷新间隔秒<input id="set-refresh" type="number" aria-label="刷新间隔秒"></label>
 <label>真拨超时秒<input id="set-timeout" type="number" aria-label="真拨超时秒"></label>
-<label>TopK 真拨数<input id="set-topk" type="number" aria-label="TopK 真拨数"></label>
+<label>TopK 真拨数<input id="set-topk" type="number" aria-label="TopK 真拨数"></label><label>节点数(0=全量)<input id="set-limit" type="number" aria-label="节点数"></label>
 <label>刷新真拨并发<input id="set-dialw" type="number" aria-label="刷新真拨并发"></label>
 <label>全量真测并发<input id="set-fpw" type="number" aria-label="全量真测并发"></label>
 <label>握手并发<input id="set-probew" type="number" aria-label="握手并发"></label>
@@ -860,6 +861,7 @@ async function loadSettings() {
     setVal("set-refresh", v.refresh_seconds);
     setVal("set-timeout", v.dial_timeout);
     setVal("set-topk", v.real_topk);
+    setVal("set-limit", v.limit);
     setVal("set-dialw", v.dial_workers);
     setVal("set-fpw", v.full_probe_workers);
     setVal("set-probew", v.probe_workers);
@@ -874,6 +876,7 @@ async function saveSettings() {
     refresh_seconds: getVal("set-refresh"),
     dial_timeout: getVal("set-timeout"),
     real_topk: getVal("set-topk"),
+    limit: getVal("set-limit"),
     dial_workers: getVal("set-dialw"),
     full_probe_workers: getVal("set-fpw"),
     probe_workers: getVal("set-probew"),
@@ -1518,7 +1521,7 @@ class RailwayManager:
         self.refresh_seconds = refresh_seconds; self.limit = limit; self.real_topk = real_topk
         self.dial_fn = (dial_fn if dial_fn is not None else (lambda node: measure_real_latency(node["endpoint"], self.singbox_bin, self.dial_timeout)))
         self.dial_workers = dial_workers; self.full_probe_workers = max(1, full_probe_workers); self.probe_workers = probe_workers
-        self.dial_timeout = dial_timeout; self.auto_repin = False; self.auto_rescue = auto_rescue
+        self.dial_timeout = dial_timeout; self.auto_repin = auto_repin; self.auto_rescue = auto_rescue
         self.verify_fn = (verify_fn if verify_fn is not None else (lambda endpoint: measure_exit_ip(endpoint, self.singbox_bin, self.dial_timeout)))
         self.config_path = config_path; self.nodes_path = nodes_path; self.state_path = state_path; self.settings_path = settings_path
         self.last_good_path = f"{config_path}.last-good"; self.singbox_bin = singbox_bin
