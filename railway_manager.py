@@ -44,7 +44,7 @@ VERIFY_STALE_AFTER_SEC = 600
 SETTINGS_SPEC: dict = {
     "refresh_seconds": {"type": "int", "min": 300, "max": 86400},
     "dial_timeout": {"type": "int", "min": 5, "max": 60},
-    "real_topk": {"type": "int", "min": 0, "max": 20},
+    "real_topk": {"type": "int", "min": 0, "max": 100},
     "limit": {"type": "int", "min": 0, "max": 100},
     "dial_workers": {"type": "int", "min": 1, "max": 5},
     "full_probe_workers": {"type": "int", "min": 1, "max": 5},
@@ -1333,7 +1333,7 @@ def build_config_from_env(env: dict) -> dict:
         "snapshot_url": snapshot_url, "snapshot_urls": snapshot_urls,
         "refresh_seconds": _int_env(env, "REFRESH_SECONDS", 3600, 60, 86400),
         "limit": _int_env(env, "LIMIT", 15, 0, 100),
-        "real_topk": _int_env(env, "REAL_TOPK", 10, 0, 20),
+        "real_topk": _int_env(env, "REAL_TOPK", 10, 0, 100),
         "dial_workers": _int_env(env, "DIAL_WORKERS", 2, 1, 5),
         "full_probe_workers": _int_env(env, "FULL_PROBE_WORKERS", 2, 1, 5),
         "probe_workers": _int_env(env, "PROBE_WORKERS", 15, 1, 30),
