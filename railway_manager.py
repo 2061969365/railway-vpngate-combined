@@ -1,23 +1,5 @@
-"""Railway entrypoint: single-$PORT multiplexer + sing-box supervisor (stdlib only).
-
-Railway exposes exactly one ingress port ($PORT, HTTP) plus an optional raw
-TCP Proxy. This process owns $PORT and dispatches by first bytes:
-
-  0x05...          -> SOCKS5 handshake, piped to sing-box mixed inbound
-  CONNECT ...      -> HTTP proxy request, piped to sing-box mixed inbound
-  GET/POST/...     -> plain HTTP: /healthz (open), /ui shell, /api/* (authed)
-  anything else    -> closed
-
-Security model: /healthz is open for the platform healthcheck. Everything
-else that serves data or mutates state (/api/*) requires
-``Authorization: Bearer <ADMIN_TOKEN>``. The /ui shell itself carries no
-data (it fetches /api/status with a token the operator pastes once).
-
-Outbound traffic leaves through sing-box openvpn-client endpoints
-(system:false, internal stack, no TUN / no NET_ADMIN needed).
-"""
+"""Simple Railway VPNGate manager: single-$PORT mux + sing-box supervisor (stdlib only)."""
 from __future__ import annotations
-
 import json
 import math
 import os
@@ -34,7 +16,6 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-
 from vpngate_to_singbox import (
     build_singbox_config,
     measure_exit_ip,
@@ -44,42 +25,31 @@ from vpngate_to_singbox import (
     probe_tcp_latency,
     snapshot_to_nodes,
 )
-
 DEFAULT_SNAPSHOT_URL = "https://www.vpngate.net/api/iphone/"
-HTTP_METHODS = (b"GET ", b"POST ", b"HEAD ", b"PUT ", b"DELETE ",
-                b"OPTIONS ", b"PATCH ")
+HTTP_METHODS = (b"GET ", b"POST ", b"HEAD ", b"PUT ", b"DELETE ", b"OPTIONS ", b"PATCH ")
 MIN_PROXY_PASS_LEN = 16
 MIN_ADMIN_TOKEN_LEN = 16
 PIPE_IDLE_TIMEOUT = 120
 MAX_MUX_CONNECTIONS = 100
-MAX_SERVING_ENDPOINTS = 30
-VERIFY_STALE_AFTER_SEC = 600
 MAX_POST_CONNECTIONS = 16
 DRAIN_TIMEOUT = 10.0
 STALE_RUNNING_AFTER = 180.0
 HEALTH_CHECK_INTERVAL = 20
 PINNED_FAIL_THRESHOLD = 3
 SUPERVISE_INTERVAL = 10
-# Cap exit-IP verification during auto-pin: each candidate may block
-# ~dial_timeout, so only the head of the ranking is verified per run.
-EXIT_VERIFY_CAP = 5
-# Extra grace on top of the estimated full-probe duration when refresh
-# waits for this round's probe before serving the pin.
-REFRESH_PROBE_GRACE = 60.0
-# Runtime-tunable settings (console /api/settings; settings.json overrides
-# env on boot). Bounds are enforced on POST; out-of-range is a 400.
+EXIT_VERIFY_CAP = 3
+REFRESH_PROBE_GRACE = 30.0
+MAX_SERVING_ENDPOINTS = 20
+VERIFY_STALE_AFTER_SEC = 600
 SETTINGS_SPEC: dict = {
     "refresh_seconds": {"type": "int", "min": 300, "max": 86400},
-    "dial_timeout": {"type": "int", "min": 5, "max": 90},
-    "real_topk": {"type": "int", "min": 0, "max": 50},
-    "dial_workers": {"type": "int", "min": 1, "max": 10},
-    "full_probe_workers": {"type": "int", "min": 1, "max": 10},
-    "probe_workers": {"type": "int", "min": 5, "max": 50},
-    "auto_repin": {"type": "bool"},
+    "dial_timeout": {"type": "int", "min": 5, "max": 60},
+    "real_topk": {"type": "int", "min": 0, "max": 20},
+    "dial_workers": {"type": "int", "min": 1, "max": 5},
+    "full_probe_workers": {"type": "int", "min": 1, "max": 5},
+    "probe_workers": {"type": "int", "min": 5, "max": 30},
     "auto_rescue": {"type": "bool"},
 }
-
-
 def _int_env(env: dict, name: str, default: int, min_val: int | None = None, max_val: int | None = None) -> int:
     raw = env.get(name, default)
     try:
@@ -94,8 +64,6 @@ def _int_env(env: dict, name: str, default: int, min_val: int | None = None, max
         print(f"refusing to start: {name}={val} above maximum {max_val}", flush=True)
         raise SystemExit(2)
     return val
-
-
 def _env_bool(env: dict, name: str, default: bool) -> bool:
     raw = env.get(name)
     if raw is None:
@@ -106,12 +74,7 @@ def _env_bool(env: dict, name: str, default: bool) -> bool:
     if text in ("0", "false", "no", "off"):
         return False
     return default
-# probe_pool=0 everywhere: every refresh (boot included) discovers all
-# handshake-alive nodes; only the expensive real tunnel dial is TopK
-# (REAL_TOPK). Truncating boot discovery to the first Speed chunk used to
-# hide nodes from full_probe until the first periodic refresh.
 CRASH_BACKOFFS = (5, 10, 20, 40, 300)
-MAX_CRASH_STREAK = 5
 
 UI_HTML = """\
 <!doctype html>
@@ -1311,37 +1274,18 @@ setInterval(() => {
 </body></html>
 """
 
-
-def classify_first_bytes(data: bytes) -> str:
-    """Decide what a new connection is from its first bytes (peeked, not consumed)."""
-    if not data:
-        return "unknown"
-    if data[0] == 0x05:
-        return "socks5"
-    if data.startswith(b"CONNECT "):
-        return "http-connect"
-    if data.startswith(HTTP_METHODS):
-        return "http"
-    return "unknown"
-
-
 def default_fetch(url: str, timeout: int = 20) -> str:
-    """Fetch a snapshot over HTTPS only (plain HTTP allows MITM node injection)."""
     if urllib.parse.urlsplit(url).scheme != "https":
         raise ValueError(f"refusing non-https snapshot url: {url}")
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return response.read().decode("utf-8", errors="replace")
-
-
 def build_config_from_env(env: dict) -> dict:
-    """Validate deployment env. Exits nonzero on weak credentials or plain-http."""
     password = env.get("PROXY_PASS", "")
     if not password:
         password = secrets.token_urlsafe(24)
         print("PROXY_PASS not set, generated a random one", flush=True)
     elif len(password) < MIN_PROXY_PASS_LEN:
-        print(f"refusing to start: PROXY_PASS must be at least {MIN_PROXY_PASS_LEN} chars",
-              flush=True)
+        print(f"refusing to start: PROXY_PASS must be at least {MIN_PROXY_PASS_LEN} chars", flush=True)
         raise SystemExit(2)
     snapshot_url = env.get("SNAPSHOT_URL", DEFAULT_SNAPSHOT_URL)
     raw_mirrors = env.get("SNAPSHOT_URLS", "")
@@ -1350,8 +1294,7 @@ def build_config_from_env(env: dict) -> dict:
         snapshot_urls = [snapshot_url]
     for url in snapshot_urls:
         if urllib.parse.urlsplit(url).scheme != "https":
-            print(f"refusing to start: snapshot url must be https: {url}",
-                  flush=True)
+            print(f"refusing to start: snapshot url must be https: {url}", flush=True)
             raise SystemExit(2)
     if "ADMIN_TOKEN" not in env or not env["ADMIN_TOKEN"]:
         admin_token = "vpn"
@@ -1368,67 +1311,47 @@ def build_config_from_env(env: dict) -> dict:
     vless_direct_port = _int_env(env, "VLESS_DIRECT_PORT", 8080, 1, 65535)
     vless_chain_port = _int_env(env, "VLESS_CHAIN_PORT", 8082, 1, 65535)
     if vless_direct_port == vless_chain_port:
-        print(f"refusing to start: VLESS_DIRECT_PORT and VLESS_CHAIN_PORT collide ({vless_direct_port})", flush=True)
+        print(f"refusing to start: VLESS ports collide ({vless_direct_port})", flush=True)
         raise SystemExit(2)
     if mixed_port in {8080, 8081, 8082, 4096, vless_direct_port, vless_chain_port}:
-        print(f"refusing to start: MIXED_PORT={mixed_port} collides with a fixed/VLESS port", flush=True)
+        print(f"refusing to start: MIXED_PORT={mixed_port} collides", flush=True)
         raise SystemExit(2)
     reserved = {8080, 8081, 8082, 4096, mixed_port, vless_direct_port, vless_chain_port}
     if port in reserved:
-        print(f"refusing to start: PORT={port} collides with a fixed port "
-              f"(reserved: {sorted(reserved)}); set PORT=3000", flush=True)
+        print(f"refusing to start: PORT={port} collides {sorted(reserved)}; set PORT=3000", flush=True)
         raise SystemExit(2)
     if port != 3000:
-        print(f"warning: PORT={port} is not 3000; tunnel ingress, TCP proxy "
-              f"and docs all assume 3000", flush=True)
+        print(f"warning: PORT={port} is not 3000", flush=True)
     return {
-        "port": port,
-        "mixed_port": mixed_port,
-        "username": env.get("PROXY_USER", "u"),
-        "password": password,
-        "admin_token": admin_token,
-        "admin_token_generated": generated,
-        "snapshot_url": snapshot_url,
-        "snapshot_urls": snapshot_urls,
+        "port": port, "mixed_port": mixed_port,
+        "username": env.get("PROXY_USER", "u"), "password": password,
+        "admin_token": admin_token, "admin_token_generated": generated,
+        "snapshot_url": snapshot_url, "snapshot_urls": snapshot_urls,
         "refresh_seconds": _int_env(env, "REFRESH_SECONDS", 3600, 60, 86400),
-        "limit": _int_env(env, "LIMIT", 0, 0, 100000),
-        "real_topk": _int_env(env, "REAL_TOPK", 10, 0, 50),
-        "dial_workers": _int_env(env, "DIAL_WORKERS", 5, 1, 10),
-        "full_probe_workers": _int_env(env, "FULL_PROBE_WORKERS", 5, 1, 10),
-        "probe_workers": _int_env(env, "PROBE_WORKERS", 20, 1, 50),
-        "dial_timeout": _int_env(env, "DIAL_TIMEOUT", 20, 5, 90),
-        "auto_repin": _env_bool(env, "AUTO_REPIN", True),
+        "limit": _int_env(env, "LIMIT", 15, 0, 100000),
+        "real_topk": _int_env(env, "REAL_TOPK", 3, 0, 20),
+        "dial_workers": _int_env(env, "DIAL_WORKERS", 2, 1, 5),
+        "full_probe_workers": _int_env(env, "FULL_PROBE_WORKERS", 2, 1, 5),
+        "probe_workers": _int_env(env, "PROBE_WORKERS", 15, 1, 30),
+        "dial_timeout": _int_env(env, "DIAL_TIMEOUT", 15, 5, 60),
         "auto_rescue": _env_bool(env, "AUTO_RESCUE", True),
         "health_check_interval": _int_env(env, "HEALTH_CHECK_INTERVAL", 20, 5, 300),
         "max_mux_connections": _int_env(env, "MAX_MUX_CONNECTIONS", 100, 1, 1000),
-        "data_dir": env.get("DATA_DIR")
-        or env.get("RAILWAY_VOLUME_MOUNT_PATH") or ".",
+        "data_dir": env.get("DATA_DIR") or env.get("RAILWAY_VOLUME_MOUNT_PATH") or ".",
         "vless_uuid": env.get("VLESS_UUID", ""),
-        "vless_direct_port": vless_direct_port,
-        "vless_chain_port": vless_chain_port,
+        "vless_direct_port": vless_direct_port, "vless_chain_port": vless_chain_port,
         "tunnel_token": env.get("TUNNEL_TOKEN", ""),
         "cloudflared_bin": env.get("CLOUDFLARED_BIN", "cloudflared"),
         "disguise_path": env.get("DISGUISE_PATH", ""),
     }
-
-
-def assign_stable_tags(nodes: list[dict], old_nodes: list[dict],
-                       tag_prefix: str = "vpngate") -> None:
-    """Reuse tags per ``server:port`` so a refresh that reorders nodes never
-    reshuffles tags (and never drops the pinned preferred tag by accident).
-
-    Nodes already carrying a tag keep it; unseen servers take the next free
-    ``tag_prefix-N`` slot. Operates in place on ``nodes``.
-    """
+def assign_stable_tags(nodes: list[dict], old_nodes: list[dict], tag_prefix: str = "vpngate") -> None:
     tag_by_key: dict[str, str] = {}
     for old in old_nodes:
         old_ep = old.get("endpoint") or {}
         if old_ep.get("tag"):
-            key = f"{old.get('server')}:{old.get('server_port')}"
-            tag_by_key.setdefault(key, old_ep["tag"])
+            tag_by_key.setdefault(f"{old.get('server')}:{old.get('server_port')}", old_ep["tag"])
     used: set[str] = set()
     counter = 0
-
     def _fresh() -> str:
         nonlocal counter
         while f"{tag_prefix}-{counter}" in used:
@@ -1436,7 +1359,6 @@ def assign_stable_tags(nodes: list[dict], old_nodes: list[dict],
         tag = f"{tag_prefix}-{counter}"
         counter += 1
         return tag
-
     for node in nodes:
         endpoint = node.get("endpoint") or {}
         tag = endpoint.get("tag") or ""
@@ -1450,24 +1372,17 @@ def assign_stable_tags(nodes: list[dict], old_nodes: list[dict],
         endpoint["tag"] = reused
         node["endpoint"] = endpoint
         used.add(reused)
-
-
 def _rss_mb() -> float | None:
-    """Own peak RSS in MB (Linux only; None where resource is missing)."""
     try:
         import resource
     except ImportError:
         return None
     try:
-        # ru_maxrss is KiB on Linux, bytes on macOS.
         scale = 1024.0 if os.name == "posix" and not sys.platform.startswith("darwin") else (1024.0 * 1024.0)
         return round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / scale, 1)
     except OSError:
         return None
-
-
 def _cpu_times(stat_path: str = "/proc/stat") -> tuple[int, int] | None:
-    """Host CPU (idle_all, total) jiffies from /proc/stat (Linux only)."""
     try:
         with open(stat_path, encoding="utf-8") as handle:
             first = handle.readline().split()
@@ -1480,18 +1395,12 @@ def _cpu_times(stat_path: str = "/proc/stat") -> tuple[int, int] | None:
     except ValueError:
         return None
     return nums[3] + nums[4], sum(nums)
-
-
 def _cpu_pct(old: tuple[int, int], new: tuple[int, int]) -> float | None:
-    """Busy % between two _cpu_times samples (None on zero/negative delta)."""
     total_delta = new[1] - old[1]
     if total_delta <= 0:
         return None
     return round((1.0 - (new[0] - old[0]) / total_delta) * 100.0, 1)
-
-
 def _cpu_model(cpuinfo_path: str = "/proc/cpuinfo") -> str | None:
-    """First 'model name' from /proc/cpuinfo (None where unavailable)."""
     try:
         with open(cpuinfo_path, encoding="utf-8") as handle:
             for line in handle:
@@ -1503,10 +1412,7 @@ def _cpu_model(cpuinfo_path: str = "/proc/cpuinfo") -> str | None:
     except OSError:
         return None
     return None
-
-
 def _mem_pct(meminfo_path: str = "/proc/meminfo") -> float | None:
-    """Host memory usage % from /proc/meminfo (None where unavailable)."""
     total = available = None
     try:
         with open(meminfo_path, encoding="utf-8") as handle:
@@ -1522,24 +1428,15 @@ def _mem_pct(meminfo_path: str = "/proc/meminfo") -> float | None:
     if not total:
         return None
     return round((total - available) / total * 100.0, 1)
-
-
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _http_response(status: str, content_type: str, body: bytes,
-                   extra_headers: dict | None = None) -> bytes:
-    lines = [f"HTTP/1.1 {status}", f"Content-Type: {content_type}",
-             f"Content-Length: {len(body)}"]
+def _http_response(status: str, content_type: str, body: bytes, extra_headers: dict | None = None) -> bytes:
+    lines = [f"HTTP/1.1 {status}", f"Content-Type: {content_type}", f"Content-Length: {len(body)}"]
     if extra_headers:
         lines.extend(f"{name}: {value}" for name, value in extra_headers.items())
     lines.append("Connection: close")
     return ("\r\n".join(lines) + "\r\n\r\n").encode() + body
-
-
-def _forward(source: socket.socket, dest: socket.socket, on_chunk=None) -> int:
-    """Forward until EOF/error/idle-timeout, returning bytes moved."""
+def _forward(source: socket.socket, dest: socket.socket) -> int:
     moved = 0
     try:
         while True:
@@ -1551,19 +1448,10 @@ def _forward(source: socket.socket, dest: socket.socket, on_chunk=None) -> int:
                 break
             dest.sendall(chunk)
             moved += len(chunk)
-            if on_chunk is not None:
-                try:
-                    on_chunk(len(chunk))
-                except Exception:
-                    pass
     except OSError:
         pass
     return moved
-
-
 def _reap_process(proc, handle=None) -> None:
-    """Terminate and reap a child process. Must run WITHOUT holding locks:
-    wait() can block for seconds and would stall health/API handlers."""
     if proc is not None:
         try:
             proc.terminate()
@@ -1582,22 +1470,14 @@ def _reap_process(proc, handle=None) -> None:
             handle.close()
         except OSError:
             pass
-
-
 def _is_partial_token(data: bytes) -> bool:
-    """True when data could still become a known first token (TCP split)."""
     if not data:
         return False
     for token in HTTP_METHODS + (b"CONNECT ",):
         if len(data) < len(token) and token.startswith(data):
             return True
     return False
-
-
-_DISGUISE_CACHE: dict[str, tuple[float, bytes | None]] = {}
-
 def _write_private_json(path: str, obj: dict) -> None:
-    """Atomically write JSON and restrict to owner-only (holds credentials)."""
     tmp_path = f"{path}.tmp-{os.getpid()}"
     with open(tmp_path, "w", encoding="utf-8") as handle:
         json.dump(obj, handle, indent=2)
@@ -1607,153 +1487,62 @@ def _write_private_json(path: str, obj: dict) -> None:
     except OSError:
         pass
     os.replace(tmp_path, path)
-
+_DISGUISE_CACHE: dict[str, tuple[float, bytes | None]] = {}
+def classify_first_bytes(data: bytes) -> str:
+    if not data:
+        return "unknown"
+    if data[0] == 0x05:
+        return "socks5"
+    if data.startswith(b"CONNECT "):
+        return "http-connect"
+    if data.startswith(HTTP_METHODS):
+        return "http"
+    return "unknown"
 
 class RailwayManager:
-    def __init__(
-        self,
-        port: int = 8080,
-        mixed_port: int = 40000,
-        username: str = "u",
-        password: str = "p",
-        admin_token: str | None = None,
-        snapshot_url: str = DEFAULT_SNAPSHOT_URL,
-        snapshot_urls: list | None = None,
-        refresh_seconds: int = 3600,
-        limit: int | None = 0,
-        real_topk: int = 0,
-        dial_fn=None,
-        dial_workers: int = 10,
-        full_probe_workers: int = 5,
-        probe_workers: int = 20,
-        dial_timeout: int = 20,
-        auto_repin: bool = True,
-        auto_rescue: bool = True,
-        verify_fn=None,
-        vless_uuid: str = "",
-        vless_direct_port: int = 8080,
-        vless_chain_port: int = 8082,
-        vless_direct_path: str = "/ws-node",
-        vless_chain_path: str = "/ws-chain",
-        tunnel_token: str = "",
-        cloudflared_bin: str = "cloudflared",
-        disguise_path: str = "",
-        config_path: str = "singbox-railway.json",
-        nodes_path: str = "nodes.json",
-        state_path: str = "state.json",
-        settings_path: str | None = None,
-        singbox_bin: str = "sing-box",
-        start_singbox: bool = True,
-        auto_refresh: bool = True,
-        fetch_on_start: bool = True,
-        retry_delays: tuple = (5, 10),
-        max_mux_connections: int = MAX_MUX_CONNECTIONS,
-        health_check_interval: int = HEALTH_CHECK_INTERVAL,
-        fetcher=None,
-    ) -> None:
-        self.port = port
-        self.mixed_port = mixed_port
-        self.username = username
-        self.password = password
-        self.admin_token = admin_token
-        self.snapshot_url = snapshot_url
+    def __init__(self, port: int = 3000, mixed_port: int = 40000, username: str = "u", password: str = "p",
+        admin_token: str | None = None, snapshot_url: str = DEFAULT_SNAPSHOT_URL, snapshot_urls: list | None = None,
+        refresh_seconds: int = 3600, limit: int | None = 15, real_topk: int = 3, dial_fn=None, dial_workers: int = 2,
+        full_probe_workers: int = 2, probe_workers: int = 15, dial_timeout: int = 15, auto_repin: bool = False,
+        auto_rescue: bool = True, verify_fn=None, vless_uuid: str = "", vless_direct_port: int = 8080,
+        vless_chain_port: int = 8082, vless_direct_path: str = "/ws-node", vless_chain_path: str = "/ws-chain",
+        tunnel_token: str = "", cloudflared_bin: str = "cloudflared", disguise_path: str = "",
+        config_path: str = "singbox-railway.json", nodes_path: str = "nodes.json", state_path: str = "state.json",
+        settings_path: str | None = None, singbox_bin: str = "sing-box", start_singbox: bool = True,
+        auto_refresh: bool = True, fetch_on_start: bool = True, retry_delays: tuple = (5, 10),
+        max_mux_connections: int = MAX_MUX_CONNECTIONS, health_check_interval: int = HEALTH_CHECK_INTERVAL, fetcher=None) -> None:
+        self.port = port; self.mixed_port = mixed_port; self.username = username; self.password = password
+        self.admin_token = admin_token; self.snapshot_url = snapshot_url
         self.snapshot_urls = list(snapshot_urls) if snapshot_urls else [snapshot_url]
-        self.refresh_seconds = refresh_seconds
-        self.limit = limit
-        self.real_topk = real_topk
-        self.dial_fn = (dial_fn if dial_fn is not None else
-                        (lambda node: measure_real_latency(
-                            node["endpoint"], self.singbox_bin,
-                            self.dial_timeout)))
-        self.dial_workers = dial_workers
-        self.full_probe_workers = max(1, full_probe_workers)
-        self.probe_workers = probe_workers
-        self.dial_timeout = dial_timeout
-        self.auto_repin = auto_repin
-        self.auto_rescue = auto_rescue
-        self.verify_fn = (verify_fn if verify_fn is not None else
-                          (lambda endpoint: measure_exit_ip(
-                              endpoint, self.singbox_bin,
-                              self.dial_timeout)))
-        self.config_path = config_path
-        self.nodes_path = nodes_path
-        self.state_path = state_path
-        self.settings_path = settings_path
-        self.last_good_path = f"{config_path}.last-good"
-        self.singbox_bin = singbox_bin
-        self.want_singbox = start_singbox
-        self.auto_refresh = auto_refresh
-        self.fetch_on_start = fetch_on_start
-        self.retry_delays = retry_delays
-        self.fetcher = fetcher or default_fetch
-        self.vless_uuid = vless_uuid
-        self.vless_direct_port = vless_direct_port
-        self.vless_chain_port = vless_chain_port
-        self.vless_direct_path = vless_direct_path
-        self.vless_chain_path = vless_chain_path
-        self.tunnel_token = tunnel_token
-        self.cloudflared_bin = cloudflared_bin
-        self.disguise_path = disguise_path
-        self._cloudflared_proc: subprocess.Popen | None = None
-        self.preferred_tag: str | None = None
-        self.backup_tag: str | None = None
-        self._auto_pinned = False
-        self._nodes: list[dict] = []
-        self._first_seen: dict[str, str] = {}
-        self._cpu_model = _cpu_model()
-        self._cpu_cores = os.cpu_count()
-        self._cpu_last: tuple[int, int] | None = None
-        self._fail_streak = 0
-        self._pinned_fail_streak = 0
-        self._rescue_round = 0
-        self._crash_streak = 0
-        self._retry_after = 0.0
-        self._lock = threading.RLock()
-        self._refresh_lock = threading.Lock()
-        self.status: dict = {
-            "endpoints": [],
-            "countries": [],
-            "preferred_tag": None,
-            "backup_tag": None,
-            "auto_pinned": False,
-            "refresh_history": [],
-            "refresh_ok": 0,
-            "refresh_fail": 0,
-            "last_refresh": None,
-            "last_error": None,
-            "started_at": None,
-            "proxy": f"127.0.0.1:{mixed_port}",
-            "traffic": {"connections": 0, "bytes_up": 0, "bytes_down": 0},
-            "full_probe": {"state": "idle", "done": 0, "total": 0},
-            "probe": {"state": "idle", "tag": None, "ms": None, "error": None},
-            "verify": {"state": "idle", "exit_ip": None, "ms": None,
-                       "via_tag": None, "error": None, "checked_at": None},
-            "tunnel": {"state": "off"},
-            "vless": ({"uuid": vless_uuid, "direct_path": vless_direct_path,
-                       "chain_path": vless_chain_path} if vless_uuid else None),
-        }
-        self._full_probe_thread: threading.Thread | None = None
-        self._single_probe_thread: threading.Thread | None = None
-        self._verify_thread: threading.Thread | None = None
-        self._verify_generation = 0
-        self._stop_event = threading.Event()
-        self._mux_slots = threading.BoundedSemaphore(max_mux_connections)
-        self._mux_inflight = 0
-        self._post_slots = threading.BoundedSemaphore(MAX_POST_CONNECTIONS)
-        self._http_slots = threading.BoundedSemaphore(50)
-        self._apply_lock = threading.RLock()
-        self._health_check_interval = health_check_interval
-        self._listener: socket.socket | None = None
-        self._singbox_proc: subprocess.Popen | None = None
-        self._stderr_handle = None
-        self.bound_port = port
-        # settings.json (console) overrides the env-derived defaults.
+        self.refresh_seconds = refresh_seconds; self.limit = limit; self.real_topk = real_topk
+        self.dial_fn = (dial_fn if dial_fn is not None else (lambda node: measure_real_latency(node["endpoint"], self.singbox_bin, self.dial_timeout)))
+        self.dial_workers = dial_workers; self.full_probe_workers = max(1, full_probe_workers); self.probe_workers = probe_workers
+        self.dial_timeout = dial_timeout; self.auto_repin = False; self.auto_rescue = auto_rescue
+        self.verify_fn = (verify_fn if verify_fn is not None else (lambda endpoint: measure_exit_ip(endpoint, self.singbox_bin, self.dial_timeout)))
+        self.config_path = config_path; self.nodes_path = nodes_path; self.state_path = state_path; self.settings_path = settings_path
+        self.last_good_path = f"{config_path}.last-good"; self.singbox_bin = singbox_bin
+        self.want_singbox = start_singbox; self.auto_refresh = auto_refresh; self.fetch_on_start = fetch_on_start
+        self.retry_delays = retry_delays; self.fetcher = fetcher or default_fetch
+        self.vless_uuid = vless_uuid; self.vless_direct_port = vless_direct_port; self.vless_chain_port = vless_chain_port
+        self.vless_direct_path = vless_direct_path; self.vless_chain_path = vless_chain_path
+        self.tunnel_token = tunnel_token; self.cloudflared_bin = cloudflared_bin; self.disguise_path = disguise_path
+        self._cloudflared_proc = None; self.preferred_tag = None; self.backup_tag = None; self._auto_pinned = False
+        self._nodes: list[dict] = []; self._first_seen: dict[str, str] = {}
+        self._cpu_model = _cpu_model(); self._cpu_cores = os.cpu_count(); self._cpu_last = None
+        self._fail_streak = 0; self._pinned_fail_streak = 0; self._rescue_round = 0; self._crash_streak = 0; self._retry_after = 0.0
+        self._lock = threading.RLock(); self._refresh_lock = threading.Lock(); self._config_lock = threading.Lock()
+        self.status: dict = {"endpoints": [], "countries": [], "preferred_tag": None, "backup_tag": None, "auto_pinned": False,
+            "refresh_history": [], "refresh_ok": 0, "refresh_fail": 0, "last_refresh": None, "last_error": None, "started_at": None,
+            "proxy": f"127.0.0.1:{mixed_port}", "traffic": {"connections": 0, "bytes_up": 0, "bytes_down": 0},
+            "full_probe": {"state": "idle", "done": 0, "total": 0}, "probe": {"state": "idle", "tag": None, "ms": None, "error": None},
+            "verify": {"state": "idle", "exit_ip": None, "ms": None, "via_tag": None, "error": None, "checked_at": None},
+            "tunnel": {"state": "off"}, "vless": ({"uuid": vless_uuid, "direct_path": vless_direct_path, "chain_path": vless_chain_path} if vless_uuid else None)}
+        self._full_probe_thread = None; self._single_probe_thread = None; self._verify_thread = None; self._verify_generation = 0
+        self._stop_event = threading.Event(); self._mux_slots = threading.BoundedSemaphore(max_mux_connections); self._mux_inflight = 0
+        self._post_slots = threading.BoundedSemaphore(MAX_POST_CONNECTIONS); self._health_check_interval = health_check_interval
+        self._listener = None; self._singbox_proc = None; self._stderr_handle = None; self.bound_port = port
         self.load_settings()
-
-    # -- lifecycle ------------------------------------------------------
     def start(self) -> int:
-        # Bind first so $PORT (and /healthz) answers immediately; the first
-        # snapshot refresh — which may dial several tunnels — runs behind.
         self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self._listener.bind(("0.0.0.0", self.port))
@@ -1761,47 +1550,30 @@ class RailwayManager:
         self._listener.settimeout(1.0)
         self.bound_port = self._listener.getsockname()[1]
         self.status["started_at"] = _now_iso()
-        threading.Thread(target=self._accept_loop, daemon=True,
-                         name="accept-loop").start()
+        threading.Thread(target=self._accept_loop, daemon=True, name="accept-loop").start()
         if self.auto_refresh:
-            threading.Thread(target=self._refresh_loop, daemon=True,
-                             name="refresh-loop").start()
-        threading.Thread(target=self._supervise_loop, daemon=True,
-                         name="supervise-loop").start()
-        threading.Thread(target=self._health_monitor_loop, daemon=True,
-                         name="health-monitor").start()
+            threading.Thread(target=self._refresh_loop, daemon=True, name="refresh-loop").start()
+        threading.Thread(target=self._supervise_loop, daemon=True, name="supervise-loop").start()
+        threading.Thread(target=self._health_monitor_loop, daemon=True, name="health-monitor").start()
         if self.fetch_on_start:
-            threading.Thread(target=self._initial_refresh, daemon=True,
-                             name="initial-refresh").start()
+            threading.Thread(target=self._initial_refresh, daemon=True, name="initial-refresh").start()
         self._start_cloudflared()
-        print(f"listening on 0.0.0.0:{self.bound_port}, backend 127.0.0.1:{self.mixed_port}",
-              flush=True)
+        print(f"listening on 0.0.0.0:{self.bound_port}, backend 127.0.0.1:{self.mixed_port}", flush=True)
         return self.bound_port
-
     def _initial_refresh(self) -> None:
-        # Fast path first: serve the last-good config within seconds so
-        # /healthz goes 200 before the (minutes-long) first live refresh
-        # finishes. Without this the deploy healthcheck only sees 503.
         if self._boot_from_last_good():
             self.refresh_once()
             return
         if self.refresh_once():
             return
         if not self._boot_from_last_good():
-            # Cold-start double failure: retry quickly a couple times instead
-            # of going dark until the next hourly cycle.
-            for delay in (30, 60):
+            for delay in (30,):
                 if self._stop_event.is_set():
                     return
                 time.sleep(delay)
-                if self._boot_from_last_good():
-                    self.refresh_once()
+                if self._boot_from_last_good() or self.refresh_once():
                     return
-                if self.refresh_once():
-                    return
-
     def _drain(self, timeout: float = DRAIN_TIMEOUT) -> bool:
-        """Wait for in-flight mux pipes to finish, up to timeout seconds."""
         deadline = time.monotonic() + max(0.0, timeout)
         while time.monotonic() < deadline:
             with self._lock:
@@ -1810,7 +1582,6 @@ class RailwayManager:
             time.sleep(0.05)
         with self._lock:
             return self._mux_inflight <= 0
-
     def stop(self) -> None:
         self._stop_event.set()
         if self._listener is not None:
@@ -1822,12 +1593,9 @@ class RailwayManager:
         drained = self._drain()
         with self._lock:
             remaining = self._mux_inflight
-        print(f"shutdown: mux drain {'done' if drained else 'timeout'} "
-              f"({remaining} in flight)", flush=True)
+        print(f"shutdown: mux drain {'done' if drained else 'timeout'} ({remaining} in flight)", flush=True)
         self._terminate_singbox()
         self._terminate_cloudflared()
-
-    # -- accept / dispatch ----------------------------------------------
     def _accept_loop(self) -> None:
         assert self._listener is not None
         while not self._stop_event.is_set():
@@ -1836,25 +1604,20 @@ class RailwayManager:
             except (OSError, socket.timeout):
                 continue
             threading.Thread(target=self._handle_client, args=(client,), daemon=True).start()
-
     def _handle_client(self, client: socket.socket) -> None:
-        http_held = False
+        held = False
         try:
+            if not self._mux_slots.acquire(blocking=False):
+                return
+            held = True
             client.settimeout(10)
             peek = client.recv(4096)
             if not peek:
                 return
             kind = classify_first_bytes(peek)
             if kind == "unknown" and _is_partial_token(peek):
-                # TCP split the request head ("GE"+"T /..."): wait for
-                # more bytes instead of dropping a valid connection.
-                # Bound slowloris: waiting holds an http slot, not unbounded threads.
-                if not self._http_slots.acquire(blocking=False):
-                    return
-                http_held = True
-                deadline = time.monotonic() + 5
-                while (len(peek) < 4096
-                       and time.monotonic() < deadline):
+                deadline = time.monotonic() + 2
+                while len(peek) < 4096 and time.monotonic() < deadline:
                     try:
                         chunk = client.recv(4096)
                     except OSError:
@@ -1866,36 +1629,22 @@ class RailwayManager:
                     if kind != "unknown" or not _is_partial_token(peek):
                         break
             if kind in ("socks5", "http-connect"):
-                if http_held:
-                    self._http_slots.release()
-                    http_held = False
-                if not self._mux_slots.acquire(blocking=False):
-                    return
+                with self._lock:
+                    self.status["traffic"]["connections"] += 1
+                    self._mux_inflight += 1
                 try:
-                    with self._lock:
-                        self.status["traffic"]["connections"] += 1
-                        self._mux_inflight += 1
                     self._pipe_to_backend(client, peek)
                 finally:
                     with self._lock:
                         self._mux_inflight -= 1
-                    self._mux_slots.release()
             elif kind == "http":
-                if not http_held:
-                    if not self._http_slots.acquire(blocking=False):
-                        return
-                    http_held = True
-                try:
-                    self._handle_http(client, peek)
-                finally:
-                    self._http_slots.release()
-                    http_held = False
+                self._handle_http(client, peek)
         except OSError:
             pass
         finally:
-            if http_held:
+            if held:
                 try:
-                    self._http_slots.release()
+                    self._mux_slots.release()
                 except Exception:
                     pass
             try:
@@ -1907,7 +1656,6 @@ class RailwayManager:
         if not self.admin_token:
             return True
         return headers.get("authorization", "") == f"Bearer {self.admin_token}"
-
     @staticmethod
     def _parse_request(data: bytes):
         try:
@@ -1923,7 +1671,6 @@ class RailwayManager:
             return method.upper(), path, query, headers, body
         except (ValueError, IndexError):
             return None
-
     def _handle_http(self, client: socket.socket, peek: bytes) -> None:
         data = peek
         while b"\r\n\r\n" not in data and len(data) < 65536:
@@ -1934,8 +1681,6 @@ class RailwayManager:
             if not chunk:
                 break
             data += chunk
-        # Read POST body fully per Content-Length (split TCP packets
-        # otherwise truncate JSON and cause false 400).
         try:
             head_part, _, after = data.partition(b"\r\n\r\n")
             clen = None
@@ -1950,7 +1695,6 @@ class RailwayManager:
                         clen = None
                     break
             if clen is not None and clen >= 0 and len(after) < clen:
-                # cap to avoid huge allocation on forged length
                 want = min(clen, 1024 * 1024)
                 client.settimeout(10)
                 while len(after) < want:
@@ -1962,8 +1706,6 @@ class RailwayManager:
                         break
                     after += chunk
                     data = head_part + b"\r\n\r\n" + after
-                    if len(data) > 2 * 1024 * 1024:
-                        break
         except Exception:
             pass
         parsed = self._parse_request(data)
@@ -1971,32 +1713,23 @@ class RailwayManager:
             return
         method, path, query, headers, body = parsed
         if path == "/healthz" and method == "GET":
-            if self._healthy():
+            if self._serving_ok():
                 client.sendall(_http_response("200 OK", "text/plain", b"ok"))
             else:
-                client.sendall(_http_response("503 Service Unavailable",
-                                              "text/plain", b"not ready"))
+                client.sendall(_http_response("503 Service Unavailable", "text/plain", b"not ready"))
             return
         if path == "/" and method == "GET":
-            body = self._disguise_body()
-            if body is not None:
-                client.sendall(_http_response("200 OK", "text/html; charset=utf-8",
-                                              body))
-            else:
-                client.sendall(_http_response("200 OK", "text/html; charset=utf-8",
-                                              UI_HTML.encode()))
+            b = self._disguise_body()
+            client.sendall(_http_response("200 OK", "text/html; charset=utf-8", b if b is not None else UI_HTML.encode()))
             return
         if path == "/ui" and method == "GET":
-            client.sendall(_http_response("200 OK", "text/html; charset=utf-8",
-                                          UI_HTML.encode()))
+            client.sendall(_http_response("200 OK", "text/html; charset=utf-8", UI_HTML.encode()))
             return
         if not self._authorized(headers):
-            client.sendall(_http_response("401 Unauthorized", "text/plain",
-                                          b"missing or invalid admin token"))
+            client.sendall(_http_response("401 Unauthorized", "text/plain", b"missing or invalid admin token"))
             return
         if path == "/api/status" and method == "GET":
-            client.sendall(_http_response("200 OK", "application/json",
-                                          json.dumps(self.status_snapshot()).encode()))
+            client.sendall(_http_response("200 OK", "application/json", json.dumps(self.status_snapshot()).encode()))
         elif path == "/api/logs" and method == "GET":
             limit = 50
             for part in query.split("&"):
@@ -2008,21 +1741,12 @@ class RailwayManager:
                         limit = 50
             limit = max(1, min(200, limit))
             tail = self.tail_singbox_stderr(max_lines=limit)
-            client.sendall(_http_response(
-                "200 OK", "application/json",
-                json.dumps({"limit": limit,
-                            "lines": tail.splitlines() if tail else []}).encode()))
+            client.sendall(_http_response("200 OK", "application/json", json.dumps({"limit": limit, "lines": tail.splitlines() if tail else []}).encode()))
         elif path == "/api/settings" and method == "GET":
-            client.sendall(_http_response("200 OK", "application/json",
-                                          json.dumps(self.settings_snapshot()).encode()))
+            client.sendall(_http_response("200 OK", "application/json", json.dumps(self.settings_snapshot()).encode()))
         elif method == "POST":
-            # Expensive endpoints share a small slot pool so a burst of
-            # refresh/probe/verify POSTs can't exhaust the box. Cheap GETs
-            # (healthz/status/ui/logs) never take a slot and can't starve.
             if not self._post_slots.acquire(blocking=False):
-                client.sendall(_http_response(
-                    "503 Service Unavailable", "text/plain",
-                    b"busy, retry later", {"Retry-After": "5"}))
+                client.sendall(_http_response("503 Service Unavailable", "text/plain", b"busy, retry later", {"Retry-After": "5"}))
                 return
             try:
                 self._route_post(client, path, headers, body)
@@ -2030,117 +1754,73 @@ class RailwayManager:
                 self._post_slots.release()
             return
         elif path.startswith("/api/"):
-            client.sendall(_http_response("405 Method Not Allowed", "text/plain",
-                                          b"method not allowed"))
+            client.sendall(_http_response("405 Method Not Allowed", "text/plain", b"method not allowed"))
         else:
             client.sendall(_http_response("404 Not Found", "text/plain", b"not found"))
 
-    def _route_post(self, client: socket.socket, path: str,
-                    headers: dict, body: bytes) -> None:
-        """Dispatch an authorized POST (caller holds a _post_slots slot)."""
+    def _route_post(self, client: socket.socket, path: str, headers: dict, body: bytes) -> None:
         if path == "/api/refresh":
             ok = self.refresh_once()
-            client.sendall(_http_response(
-                "200 OK", "application/json", json.dumps({"ok": ok}).encode()))
+            client.sendall(_http_response("200 OK", "application/json", json.dumps({"ok": ok}).encode()))
         elif path == "/api/full_probe":
             if not self._start_full_probe():
-                client.sendall(_http_response(
-                    "409 Conflict", "application/json",
-                    json.dumps({"accepted": False,
-                                "error": "already running"}).encode()))
+                client.sendall(_http_response("409 Conflict", "application/json", json.dumps({"accepted": False, "error": "already running"}).encode()))
                 return
-            client.sendall(_http_response(
-                "202 Accepted", "application/json",
-                json.dumps({"accepted": True}).encode()))
+            client.sendall(_http_response("202 Accepted", "application/json", json.dumps({"accepted": True}).encode()))
         elif path == "/api/probe":
             try:
                 payload = json.loads((body or b"{}").decode("utf-8") or "{}")
             except (ValueError, UnicodeDecodeError):
                 payload = None
             if not isinstance(payload, dict) or not payload.get("tag"):
-                client.sendall(_http_response("400 Bad Request", "text/plain",
-                                              b"missing tag"))
+                client.sendall(_http_response("400 Bad Request", "text/plain", b"missing tag"))
                 return
-            node = next((n for n in self._nodes
-                         if n.get("endpoint", {}).get("tag") == payload["tag"]),
-                        None)
+            node = next((n for n in self._nodes if n.get("endpoint", {}).get("tag") == payload["tag"]), None)
             if node is None:
-                client.sendall(_http_response(
-                    "404 Not Found", "application/json",
-                    json.dumps({"ok": False, "error": "unknown tag"}).encode()))
+                client.sendall(_http_response("404 Not Found", "application/json", json.dumps({"ok": False, "error": "unknown tag"}).encode()))
                 return
             accepted, running_tag = self._start_single_probe(node)
             if not accepted:
-                client.sendall(_http_response(
-                    "409 Conflict", "application/json",
-                    json.dumps({"accepted": False,
-                                "error": "already running",
-                                "tag": running_tag}).encode()))
+                client.sendall(_http_response("409 Conflict", "application/json", json.dumps({"accepted": False, "error": "already running", "tag": running_tag}).encode()))
                 return
-            client.sendall(_http_response(
-                "202 Accepted", "application/json",
-                json.dumps({"accepted": True,
-                            "tag": node["endpoint"]["tag"]}).encode()))
+            client.sendall(_http_response("202 Accepted", "application/json", json.dumps({"accepted": True, "tag": node["endpoint"]["tag"]}).encode()))
         elif path == "/api/verify":
             node = self._verify_target_node()
             if node is None:
-                client.sendall(_http_response(
-                    "503 Service Unavailable", "application/json",
-                    json.dumps({"ok": False,
-                                "error": "no nodes"}).encode()))
+                client.sendall(_http_response("503 Service Unavailable", "application/json", json.dumps({"ok": False, "error": "no nodes"}).encode()))
                 return
             accepted, via_tag = self._start_verify(node)
             if not accepted:
-                client.sendall(_http_response(
-                    "409 Conflict", "application/json",
-                    json.dumps({"accepted": False,
-                                "error": "already running",
-                                "tag": via_tag}).encode()))
+                client.sendall(_http_response("409 Conflict", "application/json", json.dumps({"accepted": False, "error": "already running", "tag": via_tag}).encode()))
                 return
-            client.sendall(_http_response(
-                "202 Accepted", "application/json",
-                json.dumps({"accepted": True,
-                            "via_tag": node.get("endpoint", {}).get("tag")}).encode()))
+            client.sendall(_http_response("202 Accepted", "application/json", json.dumps({"accepted": True, "via_tag": node.get("endpoint", {}).get("tag")}).encode()))
         elif path == "/api/switch":
             try:
                 payload = json.loads((body or b"{}").decode("utf-8") or "{}")
             except (ValueError, UnicodeDecodeError):
                 payload = None
             if not isinstance(payload, dict):
-                client.sendall(_http_response("400 Bad Request", "text/plain",
-                                              b"invalid json"))
+                client.sendall(_http_response("400 Bad Request", "text/plain", b"invalid json"))
                 return
             ok, detail = self.switch(tag=payload.get("tag"), country=payload.get("country"))
             status = "200 OK" if ok else "400 Bad Request"
-            client.sendall(_http_response(
-                status, "application/json",
-                json.dumps({"ok": ok, "preferred_tag": self.preferred_tag,
-                            "detail": detail}).encode()))
+            client.sendall(_http_response(status, "application/json", json.dumps({"ok": ok, "preferred_tag": self.preferred_tag, "detail": detail}).encode()))
         elif path == "/api/settings":
             try:
                 payload = json.loads((body or b"{}").decode("utf-8") or "{}")
             except (ValueError, UnicodeDecodeError):
                 payload = None
             if not isinstance(payload, dict):
-                client.sendall(_http_response("400 Bad Request", "text/plain",
-                                              b"invalid json"))
+                client.sendall(_http_response("400 Bad Request", "text/plain", b"invalid json"))
                 return
             ok, detail = self.update_settings(payload)
             status = "200 OK" if ok else "400 Bad Request"
-            client.sendall(_http_response(
-                status, "application/json",
-                json.dumps({"ok": ok,
-                            "detail": detail,
-                            "settings": self.settings_snapshot()["values"] if ok
-                            else None}).encode()))
+            client.sendall(_http_response(status, "application/json", json.dumps({"ok": ok, "detail": detail, "settings": self.settings_snapshot()["values"] if ok else None}).encode()))
         elif path.startswith("/api/"):
-            client.sendall(_http_response("405 Method Not Allowed", "text/plain",
-                                          b"method not allowed"))
+            client.sendall(_http_response("405 Method Not Allowed", "text/plain", b"method not allowed"))
         else:
             client.sendall(_http_response("404 Not Found", "text/plain", b"not found"))
-
     def _disguise_body(self) -> bytes | None:
-        """Disguise page bytes for GET /, or None to fall back to the console."""
         if not self.disguise_path:
             return None
         try:
@@ -2154,7 +1834,6 @@ class RailwayManager:
         try:
             with open(self.disguise_path, "rb") as handle:
                 data = handle.read()
-            # cap cache to 5MB to avoid memory blowup on huge files
             if len(data) > 5 * 1024 * 1024:
                 return data
             _DISGUISE_CACHE[self.disguise_path] = (mtime, data)
@@ -2162,13 +1841,11 @@ class RailwayManager:
         except OSError:
             _DISGUISE_CACHE.pop(self.disguise_path, None)
             return None
-
     def _mixed_reachable(self, timeout: int = 2) -> bool:
         try:
             return probe_tcp_latency("127.0.0.1", self.mixed_port, timeout) > 0
         except Exception:
             return False
-
     def _serving_ok(self) -> bool:
         with self._lock:
             if not self.status["endpoints"]:
@@ -2179,12 +1856,7 @@ class RailwayManager:
             alive = proc is not None and proc.poll() is None
             if not alive:
                 return False
-        # mixed check outside _lock: blocks ~2s, must not stall /api/*
         return self._mixed_reachable(timeout=2)
-
-    def _healthy(self) -> bool:
-        return self._serving_ok()
-
     def _pipe_to_backend(self, client: socket.socket, peek: bytes) -> None:
         try:
             backend = socket.create_connection(("127.0.0.1", self.mixed_port), timeout=10)
@@ -2194,30 +1866,10 @@ class RailwayManager:
         backend.settimeout(PIPE_IDLE_TIMEOUT)
         try:
             backend.sendall(peek)
-            up = [0]
-            down = [0]
-
-            def _add_up(n: int) -> None:
-                with self._lock:
-                    self.status["traffic"]["bytes_up"] += n
-
-            def _add_down(n: int) -> None:
-                with self._lock:
-                    self.status["traffic"]["bytes_down"] += n
-
-            def _up() -> None:
-                up[0] = _forward(client, backend, on_chunk=_add_up)
-
-            def _down() -> None:
-                down[0] = _forward(backend, client, on_chunk=_add_down)
-
-            first = threading.Thread(target=_up, daemon=True)
-            second = threading.Thread(target=_down, daemon=True)
-            first.start()
-            second.start()
-            first.join()
-            # One direction ended: unblock the other so join() below
-            # always returns instead of parking threads forever.
+            up = [0]; down = [0]
+            first = threading.Thread(target=lambda: up.__setitem__(0, _forward(client, backend)), daemon=True)
+            second = threading.Thread(target=lambda: down.__setitem__(0, _forward(backend, client)), daemon=True)
+            first.start(); second.start(); first.join()
             for sock in (client, backend):
                 try:
                     sock.shutdown(socket.SHUT_RDWR)
@@ -2225,9 +1877,8 @@ class RailwayManager:
                     pass
             second.join(timeout=10)
             with self._lock:
-                # up/down already counted incrementally via on_chunk;
-                # only the initial peek (sent before threads started) is missing.
-                self.status["traffic"]["bytes_up"] += len(peek)
+                self.status["traffic"]["bytes_up"] += up[0] + len(peek)
+                self.status["traffic"]["bytes_down"] += down[0]
         except OSError:
             pass
         finally:
@@ -2236,7 +1887,6 @@ class RailwayManager:
             except OSError:
                 pass
 
-    # -- status / persistence --------------------------------------------
     def status_snapshot(self) -> dict:
         with self._lock:
             snapshot = json.loads(json.dumps(self.status))
@@ -2249,13 +1899,11 @@ class RailwayManager:
                 cpu_pct = None
             if cpu_now is not None:
                 self._cpu_last = cpu_now
-        snapshot["cpu"] = {"model": self._cpu_model, "cores": self._cpu_cores,
-                           "pct": cpu_pct}
+        snapshot["cpu"] = {"model": self._cpu_model, "cores": self._cpu_cores, "pct": cpu_pct}
         snapshot["memory"] = {"rss_mb": _rss_mb(), "pct": _mem_pct()}
         now = datetime.now(timezone.utc)
         try:
-            started = datetime.strptime(self.status["started_at"] or "", "%Y-%m-%dT%H:%M:%SZ")
-            started = started.replace(tzinfo=timezone.utc)
+            started = datetime.strptime(self.status["started_at"] or "", "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
             snapshot["uptime_seconds"] = max(0, int((now - started).total_seconds()))
         except (ValueError, TypeError):
             snapshot["uptime_seconds"] = 0
@@ -2264,27 +1912,19 @@ class RailwayManager:
             first = self._first_seen.get(f"{host}:{port}")
             ep["first_seen"] = first
             try:
-                seen = datetime.strptime(first or "", "%Y-%m-%dT%H:%M:%SZ").replace(
-                    tzinfo=timezone.utc)
+                seen = datetime.strptime(first or "", "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
                 ep["alive_seconds"] = max(0, int((now - seen).total_seconds()))
             except (ValueError, TypeError):
                 ep["alive_seconds"] = 0
         return snapshot
-
     def _record_history(self, event: str, detail: str = "") -> None:
         with self._lock:
-            self.status["refresh_history"].append(
-                {"ts": _now_iso(), "event": event, "detail": detail})
+            self.status["refresh_history"].append({"ts": _now_iso(), "event": event, "detail": detail})
             del self.status["refresh_history"][:-20]
-
     def _persist_state(self) -> None:
-        _write_private_json(self.state_path, {"preferred_tag": self.preferred_tag,
-                                              "backup_tag": self.backup_tag,
-                                              "auto_pinned": self._auto_pinned})
-
+        _write_private_json(self.state_path, {"preferred_tag": self.preferred_tag, "backup_tag": self.backup_tag, "auto_pinned": self._auto_pinned})
     @staticmethod
     def _coerce_setting(key: str, value) -> tuple[bool, object, str]:
-        """Validate one settings value. Returns (ok, clean, error)."""
         spec = SETTINGS_SPEC.get(key)
         if spec is None:
             return False, None, f"unknown setting {key}"
@@ -2293,11 +1933,9 @@ class RailwayManager:
                 return True, value, ""
             if isinstance(value, (int, float)) and value in (0, 1):
                 return True, bool(value), ""
-            if isinstance(value, str) and value.strip().lower() in (
-                    "1", "true", "yes", "on"):
+            if isinstance(value, str) and value.strip().lower() in ("1", "true", "yes", "on"):
                 return True, True, ""
-            if isinstance(value, str) and value.strip().lower() in (
-                    "0", "false", "no", "off"):
+            if isinstance(value, str) and value.strip().lower() in ("0", "false", "no", "off"):
                 return True, False, ""
             return False, None, f"{key} must be a boolean"
         try:
@@ -2305,19 +1943,14 @@ class RailwayManager:
         except (TypeError, ValueError):
             return False, None, f"{key} must be an integer"
         if isinstance(value, bool) or not spec["min"] <= number <= spec["max"]:
-            return False, None, (
-                f"{key} must be {spec['min']}..{spec['max']}")
+            return False, None, f"{key} must be {spec['min']}..{spec['max']}"
         return True, number, ""
-
     def settings_snapshot(self) -> dict:
         with self._lock:
-            values = {key: getattr(self, key) for key in SETTINGS_SPEC}
-        bounds = {key: {k: v for k, v in spec.items() if k != "type"}
-                  for key, spec in SETTINGS_SPEC.items()}
+            values = {key: getattr(self, key, None) for key in SETTINGS_SPEC}
+        bounds = {key: {k: v for k, v in spec.items() if k != "type"} for key, spec in SETTINGS_SPEC.items()}
         return {"values": values, "bounds": bounds}
-
     def update_settings(self, payload: dict) -> tuple[bool, str]:
-        """Validate + apply runtime settings; persists to settings.json."""
         if not isinstance(payload, dict) or not payload:
             return False, "empty settings payload"
         clean: dict = {}
@@ -2331,12 +1964,9 @@ class RailwayManager:
                 setattr(self, key, value)
         if self.settings_path:
             _write_private_json(self.settings_path, self.settings_snapshot()["values"])
-        self._record_history(
-            "settings", ", ".join(f"{k}={v}" for k, v in clean.items()))
+        self._record_history("settings", ", ".join(f"{k}={v}" for k, v in clean.items()))
         return True, "saved"
-
     def load_settings(self) -> None:
-        """Apply settings.json over the env-derived defaults (boot only)."""
         if not self.settings_path:
             return
         try:
@@ -2350,40 +1980,27 @@ class RailwayManager:
             ok, parsed, _ = self._coerce_setting(key, value)
             if ok:
                 setattr(self, key, parsed)
-
     def _persist_nodes(self) -> None:
-        _write_private_json(self.nodes_path,
-                            {"nodes": self._nodes, "first_seen": self._first_seen})
-
+        _write_private_json(self.nodes_path, {"nodes": self._nodes, "first_seen": self._first_seen})
     def load_persisted(self) -> tuple[list, str | None]:
-        nodes: list = []
-        first_seen: dict = {}
+        nodes: list = []; first_seen: dict = {}
         try:
             with open(self.nodes_path, encoding="utf-8") as handle:
                 saved = json.load(handle)
-            nodes = saved.get("nodes", [])
-            first_seen = saved.get("first_seen", {})
+            nodes = saved.get("nodes", []); first_seen = saved.get("first_seen", {})
         except (OSError, ValueError):
             pass
-        preferred: str | None = None
-        backup: str | None = None
-        auto_pinned = False
+        preferred = backup = None; auto_pinned = False
         try:
             with open(self.state_path, encoding="utf-8") as handle:
-                saved_state = json.load(handle)
-            preferred = saved_state.get("preferred_tag")
-            backup = saved_state.get("backup_tag")
-            auto_pinned = bool(saved_state.get("auto_pinned", False))
+                s = json.load(handle)
+            preferred = s.get("preferred_tag"); backup = s.get("backup_tag"); auto_pinned = bool(s.get("auto_pinned", False))
         except (OSError, ValueError):
             pass
         with self._lock:
-            self._nodes = nodes
-            self._first_seen = first_seen
-            self.preferred_tag = preferred
-            self.backup_tag = backup
-            self._auto_pinned = auto_pinned
+            self._nodes = nodes; self._first_seen = first_seen
+            self.preferred_tag = preferred; self.backup_tag = backup; self._auto_pinned = auto_pinned
         return nodes, preferred
-
     def _boot_from_last_good(self) -> bool:
         try:
             with open(self.last_good_path, "rb") as src:
@@ -2404,33 +2021,22 @@ class RailwayManager:
         nodes, preferred = self.load_persisted()
         endpoints = nodes_to_endpoints(nodes) if nodes else []
         with self._lock:
-            self.status["endpoints"] = [
-                {"tag": ep["tag"], "server": primary_server(ep)[0],
-                 "server_port": primary_server(ep)[1],
-                 "country": n.get("country", ""), "country_short": n.get("country_short", ""),
-                 "latency_ms": n.get("latency_ms"), "real_latency_ms": n.get("real_latency_ms"),
-                 "speed": n.get("speed", 0)}
-                for ep, n in zip(endpoints, nodes)]
+            self.status["endpoints"] = [{"tag": ep["tag"], "server": primary_server(ep)[0], "server_port": primary_server(ep)[1],
+                "country": n.get("country", ""), "country_short": n.get("country_short", ""), "latency_ms": n.get("latency_ms"),
+                "real_latency_ms": n.get("real_latency_ms"), "speed": n.get("speed", 0)} for ep, n in zip(endpoints, nodes)]
             self.status["countries"] = self._countries()
-            endpoint_tags = {ep["tag"] for ep in endpoints}
-            if preferred and preferred not in endpoint_tags:
-                self.preferred_tag = None
-                self.backup_tag = None
-                self._auto_pinned = True
-                self._persist_state()
-            # keep backup only if it still exists, else drop it
-            if self.backup_tag is not None and self.backup_tag not in endpoint_tags:
-                self.backup_tag = None
-                self._persist_state()
-            self.status["preferred_tag"] = self.preferred_tag
-            self.status["backup_tag"] = self.backup_tag
+            tags = {ep["tag"] for ep in endpoints}
+            if preferred and preferred not in tags:
+                self.preferred_tag = None; self.backup_tag = None; self._auto_pinned = True; self._persist_state()
+            if self.backup_tag is not None and self.backup_tag not in tags:
+                self.backup_tag = None; self._persist_state()
+            self.status["preferred_tag"] = self.preferred_tag; self.status["backup_tag"] = self.backup_tag
             self.status["auto_pinned"] = self._auto_pinned
             self.status["last_error"] = "booted from last-good config (refresh failed)"
         if self.want_singbox:
             self._restart_singbox()
         self._record_history("boot-from-last-good", f"{len(endpoints)} endpoints")
         return True
-
     def _countries(self) -> list[dict]:
         seen: dict[str, str] = {}
         for node in self._nodes:
@@ -2438,42 +2044,34 @@ class RailwayManager:
             if code and code not in seen:
                 seen[code] = node.get("country", "")
         return [{"code": code, "name": seen[code]} for code in sorted(seen)]
-
-    # -- snapshot refresh / sing-box supervision -------------------------
     def _effective_interval(self) -> int:
         if self._fail_streak >= 3:
             return max(300, self.refresh_seconds // 2)
         return self.refresh_seconds
-
     def _refresh_loop(self) -> None:
         next_run = time.monotonic() + self._effective_interval() + random.uniform(-30, 30)
         while not self._stop_event.wait(max(0.0, next_run - time.monotonic())):
             try:
                 self.refresh_once()
-            except Exception as exc:  # never kill the refresh thread
+            except Exception as exc:
                 print(f"refresh loop error: {type(exc).__name__}: {exc}", flush=True)
-            next_run = (time.monotonic() + self._effective_interval()
-                        + random.uniform(-30, 30))
-
+            next_run = time.monotonic() + self._effective_interval() + random.uniform(-30, 30)
     def _supervise_loop(self) -> None:
         while not self._stop_event.wait(SUPERVISE_INTERVAL):
             try:
                 self._supervise_once()
-            except Exception as exc:  # never kill the supervise thread
+            except Exception as exc:
                 print(f"supervise loop error: {type(exc).__name__}: {exc}", flush=True)
-
     def _supervise_once(self) -> None:
         with self._lock:
             if not self.want_singbox:
                 return
             proc = self._singbox_proc
-            proc_alive = proc is not None and proc.poll() is None
+            alive = proc is not None and proc.poll() is None
             want_cfg = self.config_path
-            has_endpoints = bool(self.status["endpoints"])
-        if proc_alive:
-            # proc alive != serving alive (mixed may be stuck/OOM-half-dead).
-            # This is the other half of "verified but cannot connect".
-            if has_endpoints and not self._mixed_reachable(timeout=2):
+            has_ep = bool(self.status["endpoints"])
+        if alive:
+            if has_ep and not self._mixed_reachable(timeout=2):
                 with self._lock:
                     self.status["last_error"] = "sing-box alive but mixed unreachable, restarting"
                 self._record_history("supervise-mixed-dead", "mixed unreachable, restarting")
@@ -2489,18 +2087,12 @@ class RailwayManager:
             now = time.monotonic()
             if now < self._retry_after:
                 return
-            # True backoff: the gate above enforces the wait, so reaching
-            # here means a restart is due now. The streak only selects the
-            # *next* delay (clamped, never gives up: a dead tunnel must keep
-            # retrying instead of going dark until the next refresh).
             delay = CRASH_BACKOFFS[min(self._crash_streak, len(CRASH_BACKOFFS) - 1)]
             self._crash_streak = min(self._crash_streak + 1, len(CRASH_BACKOFFS) - 1)
             self._retry_after = now + delay
             exit_info = f" (previous exit code {proc.poll()})" if proc else ""
             self.status["last_error"] = f"sing-box not running{exit_info}, restarting now, next retry in {delay}s"
         self._restart_singbox()
-        # Relaunch the tunnel if it was wanted but died; _start_cloudflared
-        # soft-skips again when there is no token/binary.
         with self._lock:
             cf = self._cloudflared_proc
             want_cf = bool(self.tunnel_token)
@@ -2512,16 +2104,9 @@ class RailwayManager:
         while not self._stop_event.wait(self._health_check_interval):
             try:
                 self.check_pinned_health()
-            except Exception as exc:  # never kill the monitor thread
+            except Exception as exc:
                 print(f"health monitor error: {type(exc).__name__}: {exc}", flush=True)
-
     def _trigger_bg_refresh(self, reason: str) -> None:
-        """Fetch fresh snapshot in background when pool is all dead.
-
-        Health runs every 20s; hourly refresh is too slow when every
-        measured node died. refresh_once is single-flight so concurrent
-        triggers are safe (second gets refresh-busy and returns).
-        """
         try:
             if not self._refresh_lock.acquire(blocking=False):
                 return
@@ -2538,184 +2123,82 @@ class RailwayManager:
             self._record_history("health-trigger-refresh", reason)
         except Exception:
             pass
-
     def check_pinned_health(self, probe_fn=None) -> str:
-        """Dial the pinned tunnel; rescue when the dial fails.
-
-        Health is judged by a real tunnel dial ONLY -- never by a TCP
-        handshake (a dead tunnel keeps answering 443, so a handshake
-        says nothing about tunnel or exit-IP health). probe_fn is kept
-        as an accepted-but-ignored parameter so existing callers keep
-        working; it is never consulted.
-        """
+        """Simple health: serving must be up + pinned handshake must pass. No real tunnel dial here
+        (real dials kill serving via duplicate-cn and OOM storms). Real dials only on demand."""
         with self._lock:
             tag = self.preferred_tag
-            node = next((n for n in self._nodes
-                         if n.get("endpoint", {}).get("tag") == tag), None) if tag else None
+            node = next((n for n in self._nodes if n.get("endpoint", {}).get("tag") == tag), None) if tag else None
             self._rescue_round += 1
             round_id = self._rescue_round
         if tag is None or node is None:
             return "no-preferred"
-        # Real dial, outside the lock (may block ~dial_timeout; holding
-        # the lock would stall /healthz and every /api/* handler).
+        if self.want_singbox and not self._serving_ok():
+            self._record_history("health-serving-dead", f"{tag} serving down, restarting")
+            try:
+                self._restart_singbox()
+            except Exception:
+                pass
+            return "restarted"
+        host, port = primary_server(node.get("endpoint") or node)
         try:
-            dial_ms = self.dial_fn(node) if self.dial_fn else None
+            hand = probe_tcp_latency(host, port, 5)
         except Exception:
-            dial_ms = None
-        alive = dial_ms is not None and dial_ms > 0
+            hand = 0
+        alive = hand > 0
         with self._lock:
-            node["real_latency_ms"] = dial_ms
             if alive:
-                # Endpoint dials but serving may still be down (OOM/mixed/
-                # config mismatch): throwaway ok != serving ok. This is the
-                # classic "verified IP but cannot connect".
-                serving_down = False
-                if self.want_singbox:
-                    # release lock for mixed IO in _serving_ok (it takes _lock briefly)
-                    pass
-                recovered = self._pinned_fail_streak > 0
+                node["latency_ms"] = hand
+                if self._pinned_fail_streak > 0:
+                    self._record_history("health-dial-ok", f"{tag} handshake recovered ms={hand}")
                 self._pinned_fail_streak = 0
-                # Transition-only logging: a healthy dial every interval
-                # would otherwise evict the 20-entry history in ~7min.
-                if recovered:
-                    self._record_history("health-dial-ok",
-                                         f"{tag} tunnel dial recovered ms={dial_ms}")
-                alive_ret = "pinned"
-            else:
-                alive_ret = None
-        if alive:
-            if self.want_singbox and not self._serving_ok():
-                self._record_history("health-serving-dead",
-                                     f"{tag} dial ok but serving down, restarting sing-box")
-                try:
-                    self._restart_singbox()
-                except Exception:
-                    pass
-                return "restarted"
-            return alive_ret
-        with self._lock:
+                return "pinned"
             self._pinned_fail_streak += 1
             streak = self._pinned_fail_streak
-            rescue = self.auto_rescue
-            measured = sorted(
-                (n for n in self._nodes
-                 if n.get("real_latency_ms") is not None
-                 and (n.get("endpoint") or {}).get("tag")
-                 and (n.get("endpoint") or {}).get("tag") != tag),
-                key=lambda n: (n["real_latency_ms"],
-                               (n.get("endpoint") or {}).get("tag") or "")) \
-                if rescue else []
-            # Verify rescue target: stale real_latency alone rescues to dead
-            # nodes (measured 1h ago). Walk ranking until exit IP verifies.
-            verified_best = None
-            verified_second = None
-            for cand in measured[:EXIT_VERIFY_CAP]:
-                ctag = (cand.get("endpoint") or {}).get("tag")
-                cep = cand.get("endpoint") or cand
-                try:
-                    cip, _ = self.verify_fn(cep)
-                except Exception:
-                    cip = None
-                if cip:
-                    if verified_best is None:
-                        verified_best = ctag
-                    else:
-                        verified_second = ctag
-                        break
-            # fall back to unverified ranking only when verify itself is broken
-            # (e.g. verify_fn raises for all)? No: unverified rescue re-dies.
-            # Keep stale ranking as last resort to avoid unpin flaps in tests
-            # with start_singbox=False where verify is stubbed alive anyway.
-            if verified_best is None and measured:
-                # No exit IP anywhere: pool all dead, fetch fresh instead of
-                # pinning a dead end.
-                best = None
-                second = None
-            else:
-                best = verified_best
-                # second verified if found, else next measured (may be dead,
-                # but better than None for hot-standby; auto-pin will fix)
-                if verified_second is not None:
-                    second = verified_second
-                else:
-                    # next measured after best, even if unverified
-                    rest_tags = [(n.get("endpoint") or {}).get("tag") for n in measured
-                                 if (n.get("endpoint") or {}).get("tag") != verified_best]
-                    second = rest_tags[0] if rest_tags else None
-            # Fast path: on the FIRST failed dial, rescue immediately to
-            # an alive measured backup instead of waiting out
-            # PINNED_FAIL_THRESHOLD strikes (~3 min dark).
-            fast_rescue = (streak == 1 and best is not None)
-            if streak < PINNED_FAIL_THRESHOLD and not fast_rescue:
+            cands = sorted((n for n in self._nodes if (n.get("endpoint") or {}).get("tag") != tag and n.get("real_latency_ms") is not None),
+                key=lambda n: (n["real_latency_ms"], (n.get("endpoint") or {}).get("tag") or ""))
+            if not cands and self._nodes:
+                cands = sorted((n for n in self._nodes if (n.get("endpoint") or {}).get("tag") != tag and n.get("latency_ms") is not None),
+                    key=lambda n: (n.get("latency_ms") or 10**9,))
+            best = ((cands[0].get("endpoint") or {}).get("tag") if cands else None)
+            second = ((cands[1].get("endpoint") or {}).get("tag") if len(cands) > 1 else None)
+            if streak < PINNED_FAIL_THRESHOLD:
                 return "pinned"
-            if not fast_rescue:
-                self._pinned_fail_streak = 0
-        # Everything below runs WITHOUT the lock: _apply_config's
-        # `sing-box check` may block ~30s; holding the lock here would
-        # stall /healthz and every /api/* handler.
-        if fast_rescue:
-            with self._lock:
-                self._pinned_fail_streak = 0
-            self._record_history("health-dial-dead",
-                                 f"{tag} dial dead, fast rescue to {best}")
-        with self._apply_lock:
-            with self._lock:
-                if best is None:
-                    self.preferred_tag = None
-                    self.backup_tag = None
-                    self._auto_pinned = True
-                    self.status["preferred_tag"] = None
-                    self.status["backup_tag"] = None
-                    self.status["auto_pinned"] = True
-                    self._persist_state()
-                    self._invalidate_verify(f"unpinned after {tag} failed")
-            if best is None:
+            self._pinned_fail_streak = 0
+        if best is None:
+            with self._config_lock:
+                with self._lock:
+                    self.preferred_tag = None; self.backup_tag = None; self._auto_pinned = True
+                    self.status["preferred_tag"] = None; self.status["backup_tag"] = None; self.status["auto_pinned"] = True
+                    self._persist_state(); self._invalidate_verify(f"unpinned after {tag} failed")
                 self._apply_config(final="auto")
-                self._record_history("auto-unpin",
-                                     f"{tag} failed {PINNED_FAIL_THRESHOLD}x, fell back to auto")
-                # Pool exhausted: fetch fresh snapshot now, not next hour.
-                try:
-                    self._trigger_bg_refresh(f"{tag} pool exhausted")
-                except Exception:
-                    pass
-                return "unpinned"
-            if not self._apply_config(final="auto", preferred=best,
-                                       backup=second):
+            self._record_history("auto-unpin", f"{tag} handshake failed {PINNED_FAIL_THRESHOLD}x")
+            try:
+                self._trigger_bg_refresh(f"{tag} pool exhausted")
+            except Exception:
+                pass
+            return "unpinned"
+        with self._config_lock:
+            if not self._apply_config(final="auto", preferred=best, backup=second):
                 return "pinned"
             if not self._commit_rescue(round_id, best, second):
-                # manual won the race after our apply: revert disk to manual
                 with self._lock:
-                    cur = self.preferred_tag
-                    cur_backup = self.backup_tag
-                if cur is not None or cur_backup is not None:
-                    self._apply_config(final="auto", preferred=cur,
-                                       backup=cur_backup)
+                    cur = self.preferred_tag; cur_b = self.backup_tag
+                if cur is not None:
+                    self._apply_config(final="auto", preferred=cur, backup=cur_b)
                 return "pinned"
         self._invalidate_verify(f"rescued to {best}")
-        self._record_history(
-            "auto-rescue",
-            f"{tag} dial failed, rescued to {best}"
-            + (f" backup={second}" if second else ""))
+        self._record_history("auto-rescue", f"{tag} handshake failed, rescued to {best}" + (f" backup={second}" if second else ""))
         return "rescued"
-    def _commit_rescue(self, round_id: int, best: str | None,
-                       second: str | None) -> bool:
-        """Commit a rescue pin iff no manual switch landed after
-        this round started. Round-scoped (not a bare auto_pinned
-        flag, which would never rescue manual pins at all)."""
+    def _commit_rescue(self, round_id: int, best: str | None, second: str | None) -> bool:
         with self._lock:
             if self._rescue_round != round_id:
-                self._record_history("auto-pin-skipped",
-                                     "manual switch won the race")
+                self._record_history("auto-pin-skipped", "manual switch won the race")
                 return False
-            self.preferred_tag = best
-            self.backup_tag = second
-            self._auto_pinned = True
-            self.status["preferred_tag"] = best
-            self.status["backup_tag"] = second
-            self.status["auto_pinned"] = True
+            self.preferred_tag = best; self.backup_tag = second; self._auto_pinned = True
+            self.status["preferred_tag"] = best; self.status["backup_tag"] = second; self.status["auto_pinned"] = True
             self._persist_state()
             return True
-
     def switch(self, tag: str | None = None, country: str | None = None) -> tuple[bool, str]:
         with self._lock:
             if not self._nodes:
@@ -2723,92 +2206,52 @@ class RailwayManager:
             node = None
             if country:
                 wanted = country.strip().upper()
-                candidates = [n for n in self._nodes
-                              if n.get("country_short", "").upper() == wanted
-                              or wanted in n.get("country", "").upper()]
-                if not candidates:
+                cands = [n for n in self._nodes if n.get("country_short", "").upper() == wanted or wanted in n.get("country", "").upper()]
+                if not cands:
                     return False, f"no nodes for country {country}"
-                candidates.sort(key=lambda n: (
-                    (0, n["real_latency_ms"])
-                    if n.get("real_latency_ms") is not None
-                    else (1, n.get("latency_ms")
-                          if n.get("latency_ms") is not None else 10 ** 9),
-                    -(n.get("speed") or 0)))
-                node = candidates[0]
+                cands.sort(key=lambda n: ((0, n["real_latency_ms"]) if n.get("real_latency_ms") is not None else (1, n.get("latency_ms") if n.get("latency_ms") is not None else 10**9), -(n.get("speed") or 0)))
+                node = cands[0]
             elif tag in (None, "", "auto"):
                 target: str | None = None
             else:
-                node = next((n for n in self._nodes
-                             if n.get("endpoint", {}).get("tag") == tag), None)
+                node = next((n for n in self._nodes if n.get("endpoint", {}).get("tag") == tag), None)
                 if node is None:
                     return False, f"unknown tag {tag}"
             target = node["endpoint"]["tag"] if node is not None else None
             effective = "chain" if target else "auto"
-        # Apply first; only commit in-memory state after the checked config lands.
-        # route.final is never a bare endpoint tag: "chain" keeps the pinned
-        # node first with the urltest group as instant hot-standby.
-        # Serialized by _apply_lock so concurrent switches cannot interleave
-        # apply/commit and leave disk vs status inconsistent (last wins, consistent).
-        with self._apply_lock:
+        with self._config_lock:
             if not self._apply_config(final="auto", preferred=target):
                 return False, "config check failed, kept previous"
             with self._lock:
                 old = self.preferred_tag
-                self.preferred_tag = target
-                self.backup_tag = None
-                self._auto_pinned = False
-                self.status["preferred_tag"] = target
-                self.status["backup_tag"] = None
-                self.status["auto_pinned"] = False
-                self._rescue_round += 1
-                self._persist_state()
+                self.preferred_tag = target; self.backup_tag = None; self._auto_pinned = False
+                self.status["preferred_tag"] = target; self.status["backup_tag"] = None; self.status["auto_pinned"] = False
+                self._rescue_round += 1; self._persist_state()
         if old != target:
             self._invalidate_verify(f"pin-changed to {target}")
         self._pinned_fail_streak = 0
         self._record_history("switch", f"final={effective}")
         return True, effective
-
     def _serving_nodes(self) -> list[dict]:
-        """Nodes actually written to serving sing-box config (OOM guard).
-
-        Serving 100+ openvpn-clients on 1GB Railway OOMs: throwaway dials
-        (1 endpoint) keep working while serving dies, which is exactly
-        "verified IP but cannot connect". Cap serving to top-N by
-        real/handshake latency, always keeping preferred/backup even when
-        they fall outside top-N so a manual pin is never dropped.
-        Status still shows all nodes for probing/selection.
-        """
         with self._lock:
-            nodes = list(self._nodes)
-            preferred = self.preferred_tag
-            backup = self.backup_tag
+            nodes = list(self._nodes); preferred = self.preferred_tag; backup = self.backup_tag
         def _rank(n: dict):
-            real = n.get("real_latency_ms")
-            hand = n.get("latency_ms")
+            real = n.get("real_latency_ms"); hand = n.get("latency_ms")
             if real is not None:
                 return (0, real)
             if hand is not None:
                 return (1, hand)
-            return (2, 10 ** 9)
+            return (2, 10**9)
         ordered = sorted(nodes, key=_rank)
         top = ordered[:MAX_SERVING_ENDPOINTS]
-        top_tags = {(n.get("endpoint") or {}).get("tag") for n in top}
-        # pin must survive the cut
-        for tag in (preferred, backup):
-            if tag and tag not in top_tags:
-                hit = next((n for n in nodes if (n.get("endpoint") or {}).get("tag") == tag), None)
+        tags = {(n.get("endpoint") or {}).get("tag") for n in top}
+        for t in (preferred, backup):
+            if t and t not in tags:
+                hit = next((n for n in nodes if (n.get("endpoint") or {}).get("tag") == t), None)
                 if hit is not None:
-                    top.append(hit)
-                    top_tags.add(tag)
+                    top.append(hit); tags.add(t)
         return top
-
     def _serving_config_unchanged(self, config: dict) -> bool:
-        """True when the on-disk config already serves this exact setup.
-
-        Lets refresh/switch skip the sing-box restart (which drops every live
-        connection) when endpoints, outbounds and routing are identical and
-        the process is still alive.
-        """
         try:
             with open(self.config_path, encoding="utf-8") as handle:
                 current = json.load(handle)
@@ -2818,40 +2261,16 @@ class RailwayManager:
             if current.get(key) != config.get(key):
                 return False
         return True
-
-    def _apply_config(self, final: str = "auto", preferred: str | None = None,
-                      backup: str | None = None) -> bool:
-        """Write checked config atomically and restart sing-box. Returns success.
-
-        preferred names the pinned endpoint tag: it becomes first in the
-        "chain" selector (route.final="chain") with "auto" as hot-standby,
-        never a bare single-endpoint final. Pass backup (a second endpoint
-        tag) to seat it between preferred and "auto": best first, guaranteed
-        backup second, urltest last. When the resulting serving
-        config is identical to the running one, the restart is skipped so
-        live connections survive refreshes and no-op switches.
-        """
+    def _apply_config(self, final: str = "auto", preferred: str | None = None, backup: str | None = None) -> bool:
         serving = self._serving_nodes()
         with self._lock:
             endpoints = [n["endpoint"] for n in serving]
-            username, password = self.username, self.password
-            mixed_port = self.mixed_port
-            vless_uuid = self.vless_uuid or None
-            direct_port = self.vless_direct_port
-            chain_port = self.vless_chain_port
-            config_path = self.config_path
-            last_good_path = self.last_good_path
-            want_singbox = self.want_singbox
-        config = build_singbox_config(
-            endpoints, "127.0.0.1", mixed_port,
-            mixed_users=[(username, password)], final=final,
-            preferred=preferred, backup=backup,
-            vless_uuid=vless_uuid,
-            vless_direct_port=direct_port,
-            vless_chain_port=chain_port)
-        # Everything below runs WITHOUT the lock: `sing-box check` may
-        # block ~30s and restart waits on the old process; holding the
-        # lock here would stall /healthz and every /api/* handler.
+            username, password = self.username, self.password; mixed_port = self.mixed_port
+            vless_uuid = self.vless_uuid or None; direct_port = self.vless_direct_port; chain_port = self.vless_chain_port
+            config_path = self.config_path; last_good_path = self.last_good_path; want_singbox = self.want_singbox
+        config = build_singbox_config(endpoints, "127.0.0.1", mixed_port, mixed_users=[(username, password)],
+            final=final, preferred=preferred, backup=backup, vless_uuid=vless_uuid,
+            vless_direct_port=direct_port, vless_chain_port=chain_port)
         if want_singbox and self._serving_config_unchanged(config):
             with self._lock:
                 proc = self._singbox_proc
@@ -2859,8 +2278,7 @@ class RailwayManager:
                     return True
         tmp_path = f"{config_path}.tmp-{os.getpid()}"
         with open(tmp_path, "w", encoding="utf-8") as handle:
-            json.dump(config, handle, indent=2)
-            handle.write("\n")
+            json.dump(config, handle, indent=2); handle.write("\n")
         if not self._check_config(tmp_path):
             try:
                 os.unlink(tmp_path)
@@ -2888,178 +2306,85 @@ class RailwayManager:
         return True
 
     def refresh_once(self, fetcher=None, probe_pool: int = 0) -> bool:
-        # Manual (/api/refresh), scheduled (_refresh_loop) and boot
-        # (_initial_refresh) refreshes must never interleave: two of them
-        # writing tmp-*/nodes/state at once corrupts the config.
         if not self._refresh_lock.acquire(blocking=False):
-            self._record_history("refresh-busy",
-                                 "skipped: another refresh in progress")
+            self._record_history("refresh-busy", "skipped: another refresh in progress")
             return False
         try:
             return self._refresh_once_inner(fetcher, probe_pool)
         finally:
             self._refresh_lock.release()
-
     def _refresh_once_inner(self, fetcher=None, probe_pool: int = 0) -> bool:
         try:
             fetch = fetcher or self.fetcher
             csv_text = self._fetch_with_retry(fetch)
-            nodes = snapshot_to_nodes(csv_text, limit=self.limit,
-                                      probe_pool=probe_pool,
-                                       probe_fn=lambda h, p: probe_tcp_latency(h, p, 5),
-                                       probe_workers=self.probe_workers,
-                                       real_topk=self.real_topk, dial_fn=self.dial_fn,
-                                       dial_workers=self.dial_workers,
-                                       dial_timeout=self.dial_timeout,
-                                       singbox_bin=self.singbox_bin)
+            nodes = snapshot_to_nodes(csv_text, limit=self.limit, probe_pool=probe_pool,
+                probe_fn=lambda h, p: probe_tcp_latency(h, p, 5), probe_workers=self.probe_workers,
+                real_topk=self.real_topk, dial_fn=self.dial_fn, dial_workers=self.dial_workers,
+                dial_timeout=self.dial_timeout, singbox_bin=self.singbox_bin)
             if not nodes:
                 return self._refresh_failed("no reachable nodes, kept previous")
         except Exception as exc:
             return self._refresh_failed(f"{type(exc).__name__}: {exc}")
         with self._lock:
-            old_seen = dict(self._first_seen)
-            now = _now_iso()
-            current_keys = set()
+            old_seen = dict(self._first_seen); now = _now_iso(); cur_keys = set()
             for node in nodes:
                 key = f"{node['server']}:{node['server_port']}"
-                current_keys.add(key)
+                cur_keys.add(key)
                 self._first_seen.setdefault(key, old_seen.get(key, now))
-            for key in [k for k in self._first_seen if k not in current_keys]:
+            for key in [k for k in self._first_seen if k not in cur_keys]:
                 del self._first_seen[key]
             assign_stable_tags(nodes, self._nodes)
             self._nodes = nodes
             endpoints = nodes_to_endpoints(nodes)
-            endpoint_tags = {ep["tag"] for ep in endpoints}
-            if (self.preferred_tag is not None
-                    and self.preferred_tag not in endpoint_tags):
-                self._record_history("preferred-gone",
-                                     f"{self.preferred_tag} vanished, back to auto")
-                self.preferred_tag = None
-                self.backup_tag = None
-                self._auto_pinned = True
+            tags = {ep["tag"] for ep in endpoints}
+            if self.preferred_tag is not None and self.preferred_tag not in tags:
+                self._record_history("preferred-gone", f"{self.preferred_tag} vanished, back to auto")
+                self.preferred_tag = None; self.backup_tag = None; self._auto_pinned = True
             elif self.preferred_tag is None:
                 self.backup_tag = None
             preferred = self.preferred_tag
-            backup = (self.backup_tag if self.backup_tag in endpoint_tags
-                      else None)
+            backup = self.backup_tag if self.backup_tag in tags else None
             if backup != self.backup_tag:
                 self.backup_tag = backup
-        # route.final stays on the hot-standby path: "chain" (preferred first,
-        # urltest group second) when pinned, plain "auto" otherwise.
-        # Serialized by _apply_lock: apply+status commit atomic vs switch/rescue.
-        with self._apply_lock:
-            if not self._apply_config(final="auto", preferred=preferred,
-                                       backup=backup):
+        with self._config_lock:
+            if not self._apply_config(final="auto", preferred=preferred, backup=backup):
                 return self._refresh_failed("config check failed, kept previous")
             with self._lock:
-                self.status["endpoints"] = [
-                {"tag": ep["tag"], "server": primary_server(ep)[0],
-                 "server_port": primary_server(ep)[1],
-                 "country": n.get("country", ""), "country_short": n.get("country_short", ""),
-                 "latency_ms": n.get("latency_ms"), "real_latency_ms": n.get("real_latency_ms"),
-                 "speed": n.get("speed", 0)}
-                for ep, n in zip(endpoints, nodes)]
-            self.status["countries"] = self._countries()
-            self.status["preferred_tag"] = self.preferred_tag
-            self.status["backup_tag"] = self.backup_tag
-            self.status["auto_pinned"] = self._auto_pinned
-            self.status["last_refresh"] = _now_iso()
-            self.status["last_error"] = None
-            self.status["refresh_ok"] += 1
-            self._fail_streak = 0
-            self._crash_streak = 0
-        self._persist_nodes()
-        self._persist_state()
+                self.status["endpoints"] = [{"tag": ep["tag"], "server": primary_server(ep)[0], "server_port": primary_server(ep)[1],
+                    "country": n.get("country", ""), "country_short": n.get("country_short", ""), "latency_ms": n.get("latency_ms"),
+                    "real_latency_ms": n.get("real_latency_ms"), "speed": n.get("speed", 0)} for ep, n in zip(endpoints, nodes)]
+                self.status["countries"] = self._countries()
+                self.status["preferred_tag"] = self.preferred_tag; self.status["backup_tag"] = self.backup_tag
+                self.status["auto_pinned"] = self._auto_pinned; self.status["last_refresh"] = _now_iso()
+                self.status["last_error"] = None; self.status["refresh_ok"] += 1
+                self._fail_streak = 0; self._crash_streak = 0
+        self._persist_nodes(); self._persist_state()
         effective = "chain" if preferred else "auto"
         self._record_history("refresh-ok", f"{len(endpoints)} endpoints, final={effective}")
         print(f"refreshed {len(endpoints)} endpoints, final={effective}", flush=True)
-        # Gate: every successful refresh (boot, periodic, manual) kicks
-        # off a full probe AND waits (bounded) for this round's probe to
-        # land before returning, so the serving pin always describes this
-        # round's measurements — never last round's stale values or a
-        # handshake-only blind pick. A wedged probe must not wedge
-        # refresh: on timeout refresh keeps the previous pin and the
-        # background probe pins whenever it finishes.
-        if self._start_full_probe():
-            self._wait_for_this_round_probe()
-        else:
-            self._record_history("refresh-probe-skipped",
-                                 "another probe already running, kept previous pin")
         return True
-
-    def _wait_for_this_round_probe(self) -> bool:
-        """Join this round's full-probe thread within a bounded budget.
-
-        Budget = estimated probe duration (nodes / workers x timeout)
-        + exit-IP verification head (2 x EXIT_VERIFY_CAP x timeout for
-        best+backup, same worker thread runs _auto_pin_best after dials)
-        + REFRESH_PROBE_GRACE. Returns True when the probe landed in
-        time, False on timeout (previous pin kept, background thread
-        still pins on completion).
-        """
-        with self._lock:
-            thread = self._full_probe_thread
-            total = max(1, len(self._nodes))
-            workers = max(1, self.full_probe_workers)
-            dial_timeout = self.dial_timeout
-            thread_copy = thread
-        if thread_copy is None:
-            return True
-        thread = thread_copy
-        budget = (math.ceil(total / workers) * dial_timeout
-                  + 2 * EXIT_VERIFY_CAP * dial_timeout
-                  + REFRESH_PROBE_GRACE)
-        thread.join(timeout=budget)
-        landed = not thread.is_alive()
-        if not landed:
-            self._record_history("refresh-probe-timeout",
-                                 f"probe still running after {budget:.0f}s, kept previous pin")
-        return landed
-
     def _refresh_failed(self, reason: str) -> bool:
         with self._lock:
-            self.status["last_error"] = reason
-            self.status["refresh_fail"] += 1
-            self._fail_streak += 1
+            self.status["last_error"] = reason; self.status["refresh_fail"] += 1; self._fail_streak += 1
         self._record_history("refresh-fail", reason)
         print(f"refresh failed: {reason}", flush=True)
         return False
-
     def _start_full_probe(self) -> bool:
-        # State-string-only guard: check+set are atomic under the lock, so
-        # concurrent starters serialize here. Unlike single-probe/verify
-        # no thread object is consulted, so publishing the thread outside
-        # the lock is harmless — a second starter still sees "running".
         with self._lock:
             if self.status["full_probe"].get("state") == "running":
                 return False
-            self.status["full_probe"] = {"state": "running", "done": 0,
-                                         "total": len(self._nodes)}
-        thread = threading.Thread(target=self._run_full_probe, daemon=True,
-                                      name="full-probe")
+            self.status["full_probe"] = {"state": "running", "done": 0, "total": len(self._nodes)}
+        thread = threading.Thread(target=self._run_full_probe, daemon=True, name="full-probe")
         self._full_probe_thread = thread
         thread.start()
         return True
-
     def _run_full_probe(self) -> None:
-        # Startup gate so /api/status readers can observe the "running"
-        # state even when dial_fn returns instantly (e.g. in tests).
         time.sleep(0.2)
         with self._lock:
             nodes = list(self._nodes)
             self.status["full_probe"]["total"] = len(nodes)
             start_preferred = self.preferred_tag
-        # Dial handshake-ascending so the fastest candidates resolve first.
-        # done counts completions, so progress jumps as workers finish
-        # rather than in list order. No pin happens mid-run: the serving
-        # pin is only set after the whole pool is measured, so cold boot
-        # never serves a blind first-finisher.
-        ordered = sorted(
-            nodes,
-            key=lambda n: (n.get("latency_ms") is None,
-                           n.get("latency_ms") or 0,
-                           n.get("server") or ""))
-
+        ordered = sorted(nodes, key=lambda n: (n.get("latency_ms") is None, n.get("latency_ms") or 0, n.get("server") or ""))
         def _dial_one(node: dict) -> None:
             try:
                 ms = self.dial_fn(node) if self.dial_fn else None
@@ -3068,182 +2393,66 @@ class RailwayManager:
             with self._lock:
                 node["real_latency_ms"] = ms
                 self.status["full_probe"]["done"] += 1
-
         with ThreadPoolExecutor(max_workers=self.full_probe_workers) as executor:
             list(executor.map(_dial_one, ordered))
         with self._lock:
             self.status["full_probe"]["state"] = "done"
             self._sync_probe_results(nodes)
         self._auto_pin_best(nodes, start_preferred)
-        self._record_history("full-probe-done",
-                             f"{len(nodes)} nodes dialed")
-
-    def _auto_pin_single(self, tag: str) -> None:
-        """Pin the first measured node immediately (auto track only).
-
-        Deprecated: kept for backward compatibility but no longer called.
-        Mid-run pins served blind first-finishers before the pool was
-        measured; pins now happen only after completion.
-        """
-        with self._lock:
-            if self.preferred_tag is not None:
-                return
-        if not self._apply_config(final="auto", preferred=tag):
-            return
-        with self._lock:
-            if self.preferred_tag is not None:
-                return
-            self.preferred_tag = tag
-            self.backup_tag = None
-            self._auto_pinned = True
-            self.status["preferred_tag"] = tag
-            self.status["backup_tag"] = None
-            self.status["auto_pinned"] = True
-            self._persist_state()
-        self._record_history("auto-pin-first", tag)
-
-    def _auto_pin_best(self, nodes: list[dict],
-                       start_preferred: str | None) -> None:
-        """Pin best + backup after a full probe, with guards.
-
-        Auto track re-pins to the measured best every completed run, so
-        hourly cycles follow the fastest node. Manual pins are never
-        overridden here (a manual death is rescued by the health
-        monitor instead). Skips when nothing measured or when the user
-        pinned/switched mid-run. Keeps the current pin on ties or when
-        it still measures best, so unchanged pools don't flap the
-        serving config.
-        """
-        measured = sorted(
-            (n for n in nodes
-             if n.get("real_latency_ms") is not None
-             and (n.get("endpoint") or {}).get("tag")),
-            key=lambda n: (n["real_latency_ms"],
-                           (n.get("endpoint") or {}).get("tag") or ""))
+        self._record_history("full-probe-done", f"{len(nodes)} nodes dialed")
+    def _auto_pin_best(self, nodes: list[dict], start_preferred: str | None) -> None:
+        measured = sorted((n for n in nodes if n.get("real_latency_ms") is not None and (n.get("endpoint") or {}).get("tag")),
+            key=lambda n: (n["real_latency_ms"], (n.get("endpoint") or {}).get("tag") or ""))
         if not measured:
             self._record_history("auto-pin-skipped", "nothing measured")
             return
-        with self._lock:
-            if not self.auto_repin:
-                self._record_history("auto-pin-skipped",
-                                     "auto re-pin disabled")
-                return
         best = (measured[0].get("endpoint") or {}).get("tag")
-        second = ((measured[1].get("endpoint") or {}).get("tag")
-                  if len(measured) > 1 else None)
-        best_node = measured[0]
+        second = ((measured[1].get("endpoint") or {}).get("tag") if len(measured) > 1 else None)
         with self._lock:
-            if self.preferred_tag is not None and not self._auto_pinned:
-                skipped = "manual pin kept"
-            elif (start_preferred is not None
-                    and self.preferred_tag != start_preferred):
-                skipped = f"switched mid-run to {self.preferred_tag}"
-            else:
-                skipped = ""
-            if skipped:
-                self._record_history("auto-pin-skipped", skipped)
+            if self.preferred_tag is not None:
+                self._record_history("auto-pin-skipped", "pin exists, manual full-probe keeps pin (use switch to change)")
                 return
-            tie = (self.preferred_tag is not None
-                   and self.preferred_tag == best
-                   and self.backup_tag == second
-                   and best_node.get("real_latency_ms") is not None)
-        if tie:
-            # N1: even on a tie the best must still prove its exit
-            # IP once per round (a tunnel that dials but lost its
-            # exit must not be kept forever). Exactly one best-only
-            # check; failure falls through to the reselect below.
-            best_ep = best_node.get("endpoint") or best_node
-            try:
-                tie_ip, _ms = self.verify_fn(best_ep)
-            except Exception:
-                tie_ip = None
-            if tie_ip:
-                self._record_history(
-                    "auto-pin-skipped",
-                    f"pins unchanged {best}"
-                    + (f"+{second}" if second else ""))
+            if start_preferred is not None and self.preferred_tag != start_preferred:
+                self._record_history("auto-pin-skipped", f"switched mid-run to {self.preferred_tag}")
                 return
-            self._record_history(
-                "auto-pin-skipped",
-                f"pins unchanged but {best} lost its exit ip, reselecting")
-        # Verify the winner's exit IP before pinning it: a tunnel that
-        # dials but yields no exit IP must never become the serving pin.
-        # Walk the measured ranking until one yields an exit IP; none
-        # usable keeps the current pin instead of pinning a dead end.
-        # Bounded to the first few candidates: each verify_fn may block
-        # ~dial_timeout, and the tail of a large dead pool is never worth
-        # the wait (next full probe re-ranks anyway).
-        pinned: str | None = None
-        pinned_second: str | None = None
-        verified_tags: list[str] = []
-        for i, candidate in enumerate(measured[:EXIT_VERIFY_CAP]):
-            cand_tag = (candidate.get("endpoint") or {}).get("tag")
-            cand_ep = candidate.get("endpoint") or candidate
+        pinned = None; pinned_second = None
+        for i, cand in enumerate(measured[:EXIT_VERIFY_CAP]):
+            tag = (cand.get("endpoint") or {}).get("tag")
+            ep = cand.get("endpoint") or cand
             try:
-                exit_ip, _ms = self.verify_fn(cand_ep)
+                ip, _ = self.verify_fn(ep)
             except Exception:
-                exit_ip = None
-            if exit_ip:
-                pinned = cand_tag
-                # verify backup as well: next measured with a live exit IP,
-                # not just next measured (which may dial but have no exit).
-                rest = [n for n in measured[i + 1:]
-                        if (n.get("endpoint") or {}).get("tag") != cand_tag]
+                ip = None
+            if ip:
+                pinned = tag
+                rest = [n for n in measured[i+1:] if (n.get("endpoint") or {}).get("tag") != tag]
                 pinned_second = None
-                for rcand in rest[:EXIT_VERIFY_CAP]:
-                    rtag = (rcand.get("endpoint") or {}).get("tag")
-                    rep = rcand.get("endpoint") or rcand
+                for r in rest[:EXIT_VERIFY_CAP]:
                     try:
-                        rip, _ = self.verify_fn(rep)
+                        rip, _ = self.verify_fn(r.get("endpoint") or r)
                     except Exception:
                         rip = None
                     if rip:
-                        pinned_second = rtag
+                        pinned_second = (r.get("endpoint") or {}).get("tag")
                         break
                 break
-            verified_tags.append(cand_tag or "?")
         if pinned is None:
-            self._record_history(
-                "auto-pin-skipped",
-                f"no exit ip from {len(measured)} measured "
-                f"({','.join(verified_tags)})")
+            self._record_history("auto-pin-skipped", "no exit ip")
             return
-        best, second = pinned, pinned_second
-        if pinned != (measured[0].get("endpoint") or {}).get("tag"):
-            self._record_history(
-                "auto-pin-exit-skip",
-                f"{(measured[0].get('endpoint') or {}).get('tag')} "
-                f"has no exit ip, pinned {pinned}")
-        with self._apply_lock:
-            if not self._apply_config(final="auto", preferred=best,
-                                      backup=second):
-                self._record_history("auto-pin-failed", best)
+        with self._config_lock:
+            if not self._apply_config(final="auto", preferred=pinned, backup=pinned_second):
+                self._record_history("auto-pin-failed", pinned)
                 return
             with self._lock:
-                if self.preferred_tag is not None and not self._auto_pinned:
-                    self._record_history("auto-pin-skipped",
-                                         "manual pin won the race")
-                    # revert disk: manual pin must win on disk too, not just memory.
-                    # Re-apply manual to undo our just-written auto config.
-                    manual = self.preferred_tag
-                    manual_backup = self.backup_tag
-                else:
-                    manual = None
-                    self.preferred_tag = best
-                    self.backup_tag = second
-                    self._auto_pinned = True
-                    self.status["preferred_tag"] = best
-                    self.status["backup_tag"] = second
-                    self.status["auto_pinned"] = True
-                    self._persist_state()
-            if manual is not None:
-                self._apply_config(final="auto", preferred=manual,
-                                   backup=manual_backup)
-                return
-        self._invalidate_verify(f"auto-pinned to {best}")
-        self._record_history(
-            "auto-pin", best + (f" backup={second}" if second else ""))
-
+                if self.preferred_tag is not None:
+                    self._record_history("auto-pin-skipped", "pin won the race")
+                    self._apply_config(final="auto", preferred=self.preferred_tag, backup=self.backup_tag)
+                    return
+                self.preferred_tag = pinned; self.backup_tag = pinned_second; self._auto_pinned = True
+                self.status["preferred_tag"] = pinned; self.status["backup_tag"] = pinned_second; self.status["auto_pinned"] = True
+                self._persist_state()
+        self._invalidate_verify(f"auto-pinned to {pinned}")
+        self._record_history("auto-pin", pinned + (f" backup={pinned_second}" if pinned_second else ""))
     def _sync_probe_results(self, nodes: list[dict]) -> None:
         by_key: dict = {}
         for ep in self.status["endpoints"]:
@@ -3258,62 +2467,33 @@ class RailwayManager:
                 continue
             while f"vpngate-{counter}" in used:
                 counter += 1
-            tag = f"vpngate-{counter}"
-            counter += 1
-            used.add(tag)
+            tag = f"vpngate-{counter}"; counter += 1; used.add(tag)
             self._first_seen.setdefault(f"{key[0]}:{key[1]}", _now_iso())
-            entry = {"tag": tag, "server": node.get("server"),
-                     "server_port": node.get("server_port"),
-                     "country": node.get("country", ""),
-                     "country_short": node.get("country_short", ""),
-                     "latency_ms": node.get("latency_ms"),
-                     "real_latency_ms": node.get("real_latency_ms"),
-                     "speed": node.get("speed", 0)}
+            entry = {"tag": tag, "server": node.get("server"), "server_port": node.get("server_port"),
+                "country": node.get("country", ""), "country_short": node.get("country_short", ""),
+                "latency_ms": node.get("latency_ms"), "real_latency_ms": node.get("real_latency_ms"), "speed": node.get("speed", 0)}
             self.status["endpoints"].append(entry)
             by_key[key] = [entry]
-
     @staticmethod
     def _running_fresh(state: dict, thread) -> bool:
-        """True when a running worker is alive and not stale.
-
-        A hung dial_fn (or a thread parked on the dial gate) must never wedge
-        the guard forever: runs older than STALE_RUNNING_AFTER may be
-        superseded by a fresh request.
-        """
         if state.get("state") != "running":
             return False
         if thread is not None and thread.is_alive():
             age = time.monotonic() - state.get("started_at", 0.0)
             return age < STALE_RUNNING_AFTER
         return False
-
     def _start_single_probe(self, node: dict) -> tuple[bool, str | None]:
-        """Start a single-node probe unless one is already running.
-
-        Returns (accepted, running_tag): global per-slot single-flight, so a
-        second click while any probe runs gets a 409 naming the running tag
-        instead of stacking another dial thread + sing-box process.
-        """
         with self._lock:
             cur = self.status["probe"]
             if self._running_fresh(cur, self._single_probe_thread):
                 return False, cur.get("tag")
             tag = node.get("endpoint", {}).get("tag")
-            self.status["probe"] = {"state": "running", "tag": tag,
-                                    "ms": None, "error": None,
-                                    "started_at": time.monotonic()}
-            # Check, thread publish and start are one atomic step: a
-            # concurrent starter must see either idle or a live thread,
-            # never running-with-no-thread (which would double-accept).
-            thread = threading.Thread(target=self._run_single_probe, args=(node,),
-                                      daemon=True, name=f"single-probe-{tag}")
+            self.status["probe"] = {"state": "running", "tag": tag, "ms": None, "error": None, "started_at": time.monotonic()}
+            thread = threading.Thread(target=self._run_single_probe, args=(node,), daemon=True, name=f"single-probe-{tag}")
             self._single_probe_thread = thread
             thread.start()
         return True, tag
-
     def _run_single_probe(self, node: dict) -> None:
-        # Startup gate so /api/status readers can observe the "running"
-        # state even when dial_fn returns instantly (e.g. in tests).
         time.sleep(0.2)
         tag = node.get("endpoint", {}).get("tag")
         try:
@@ -3323,42 +2503,19 @@ class RailwayManager:
             ms = None
             error = f"{type(exc).__name__}: {exc}"
         with self._lock:
-            # Re-resolve the live node: a refresh may have rebound
-            # self._nodes mid-dial, leaving `node` detached. Writing the
-            # result onto the detached dict would fix the served table
-            # (via _sync_probe_results below) but leave auto-pin/switch
-            # health reads stale on the live entry.
-            live = next((n for n in self._nodes
-                         if (n.get("endpoint") or {}).get("tag") == tag),
-                        node)
+            live = next((n for n in self._nodes if (n.get("endpoint") or {}).get("tag") == tag), node)
             live["real_latency_ms"] = ms
             node["real_latency_ms"] = ms
-            # Same shared helper as the full probe: updates the served row
-            # by key, appending when the endpoint list was rebuilt mid-dial
-            # so the result can never be silently dropped.
             self._sync_probe_results([node])
-            # The node was already in the sing-box config (every live node
-            # gets an endpoint at refresh), so a measured node is immediately
-            # switchable -- no config rebuild needed.
-            self.status["probe"] = {"state": "done", "tag": tag,
-                                    "ms": ms, "error": error}
+            self.status["probe"] = {"state": "done", "tag": tag, "ms": ms, "error": error}
         self._record_history("single-probe", f"{tag} ms={ms}")
-
     def _verify_target_node(self) -> dict | None:
-        """Node backing the live chain: pinned preferred, else first node."""
         if self.preferred_tag:
             for node in self._nodes:
                 if node.get("endpoint", {}).get("tag") == self.preferred_tag:
                     return node
         return self._nodes[0] if self._nodes else None
-
     def _start_verify(self, node: dict) -> tuple[bool, str | None]:
-        """Start an exit-IP verify unless one is already running.
-
-        Same single-flight contract as _start_single_probe: returns
-        (accepted, running_tag); the verify target is singular by design
-        (pinned preferred, else first node), so one slot suffices.
-        """
         with self._lock:
             cur = self.status["verify"]
             if self._running_fresh(cur, self._verify_thread):
@@ -3366,22 +2523,12 @@ class RailwayManager:
             tag = node.get("endpoint", {}).get("tag")
             self._verify_generation += 1
             gen = self._verify_generation
-            self.status["verify"] = {"state": "running", "exit_ip": None,
-                                     "ms": None, "via_tag": tag,
-                                     "error": None, "checked_at": None,
-                                     "generation": gen,
-                                     "started_at": time.monotonic()}
-            # Same atomicity as single-probe: check, publish and start
-            # under one lock hold so concurrent POSTs can't double-accept.
-            thread = threading.Thread(target=self._run_verify, args=(node, gen),
-                                      daemon=True, name=f"verify-{tag}")
+            self.status["verify"] = {"state": "running", "exit_ip": None, "ms": None, "via_tag": tag, "error": None, "checked_at": None, "generation": gen, "started_at": time.monotonic()}
+            thread = threading.Thread(target=self._run_verify, args=(node, gen), daemon=True, name=f"verify-{tag}")
             self._verify_thread = thread
             thread.start()
         return True, tag
-
     def _run_verify(self, node: dict, gen: int) -> None:
-        # Startup gate so /api/status readers can observe the "running"
-        # state even when verify_fn returns instantly (e.g. in tests).
         time.sleep(0.2)
         tag = node.get("endpoint", {}).get("tag")
         endpoint = node.get("endpoint") or node
@@ -3392,56 +2539,20 @@ class RailwayManager:
         except Exception as exc:
             exit_ip, ms = None, None
             error = f"{type(exc).__name__}: {exc}"
-        # Throwaway can succeed while serving is dead (OOM/mixed down/config
-        # mismatch): never show an IP when serving cannot carry it.
-        serving_ok = True
-        serving_detail = ""
-        if exit_ip and self.want_singbox:
-            if not self._serving_ok():
-                serving_ok = False
-                serving_detail = "serving sing-box/mixed down, throwaway ok"
-            else:
-                with self._lock:
-                    cur = self.preferred_tag
-                # serving config must actually contain this tag (cap keeps pin,
-                # but a stale verify for an evicted tag must not show as current)
-                try:
-                    serving_tags = {n.get("endpoint", {}).get("tag") for n in self._serving_nodes()}
-                except Exception:
-                    serving_tags = set()
-                if tag not in serving_tags and tag != cur:
-                    serving_ok = False
-                    serving_detail = f"{tag} not in serving config"
-        if not serving_ok:
-            error = serving_detail + (f" ({error})" if error else "")
-            exit_ip, ms = None, None
+        if exit_ip and self.want_singbox and not self._serving_ok():
+            error = "serving down, throwaway ok"; exit_ip, ms = None, None
         checked_at = _now_iso()
         with self._lock:
             if gen != self._verify_generation:
-                self._record_history("verify-discarded",
-                                     f"{tag} superseded by generation {self._verify_generation}")
+                self._record_history("verify-discarded", f"{tag} superseded")
                 return
-            self.status["verify"] = {"state": "done", "exit_ip": exit_ip,
-                                     "ms": ms, "via_tag": tag,
-                                     "error": error, "generation": gen,
-                                     "checked_at": checked_at}
+            self.status["verify"] = {"state": "done", "exit_ip": exit_ip, "ms": ms, "via_tag": tag, "error": error, "generation": gen, "checked_at": checked_at}
         self._record_history("verify-done", f"{tag} exit={exit_ip} ms={ms}")
-
     def _invalidate_verify(self, reason: str) -> None:
-        """Reset verify to idle and retire any in-flight verify thread.
-
-        Called whenever the serving pin changes: the previous exit IP no
-        longer describes the current exit, and a stale thread must not
-        overwrite the next measurement (generation mismatch discards it).
-        """
         with self._lock:
             self._verify_generation += 1
-            self.status["verify"] = {"state": "idle", "exit_ip": None,
-                                     "ms": None, "via_tag": None,
-                                     "error": None, "checked_at": None,
-                                     "generation": self._verify_generation}
+            self.status["verify"] = {"state": "idle", "exit_ip": None, "ms": None, "via_tag": None, "error": None, "checked_at": None, "generation": self._verify_generation}
         self._record_history("verify-invalidated", reason)
-
     def _fetch_with_retry(self, fetch) -> str:
         last_exc: Exception | None = None
         delays = [0] + list(self.retry_delays)
@@ -3455,44 +2566,32 @@ class RailwayManager:
                     last_exc = exc
         assert last_exc is not None
         raise last_exc
-
     def _check_config(self, path: str) -> bool:
         try:
-            result = subprocess.run([self.singbox_bin, "check", "-c", path],
-                                    capture_output=True, timeout=30)
+            result = subprocess.run([self.singbox_bin, "check", "-c", path], capture_output=True, timeout=30)
             return result.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False
-
     @staticmethod
     def _rotate_stderr_file(stderr_path: str, keep_bytes: int = 200 * 1024) -> None:
-        """Keep crash context: rotate a full stderr log to .prev instead of
-        deleting it, so /api/logs-adjacent debugging survives restarts."""
         try:
-            if (os.path.exists(stderr_path)
-                    and os.path.getsize(stderr_path) > keep_bytes):
+            if os.path.exists(stderr_path) and os.path.getsize(stderr_path) > keep_bytes:
                 os.replace(stderr_path, f"{stderr_path}.prev")
         except OSError:
             pass
-
     def _restart_singbox(self) -> None:
         with self._lock:
             old_proc, self._singbox_proc = self._singbox_proc, None
             old_handle, self._stderr_handle = self._stderr_handle, None
             stderr_path = f"{self.config_path}.stderr.log"
-            config_path = self.config_path
-            singbox_bin = self.singbox_bin
+            config_path = self.config_path; singbox_bin = self.singbox_bin
             self._rotate_stderr_file(stderr_path)
             try:
                 new_handle = open(stderr_path, "ab")
             except OSError:
                 new_handle = None
             try:
-                new_proc = subprocess.Popen(
-                    [singbox_bin, "run", "-c", config_path],
-                    stdout=subprocess.DEVNULL,
-                    stderr=new_handle or subprocess.DEVNULL,
-                )
+                new_proc = subprocess.Popen([singbox_bin, "run", "-c", config_path], stdout=subprocess.DEVNULL, stderr=new_handle or subprocess.DEVNULL)
             except OSError as exc:
                 print(f"sing-box start failed: {exc}", flush=True)
                 new_proc = None
@@ -3502,27 +2601,14 @@ class RailwayManager:
                     except OSError:
                         pass
                     new_handle = None
-            self._singbox_proc = new_proc
-            self._stderr_handle = new_handle
-        # Reap outside the lock; the supervise loop retries a dead proc
-        # with backoff, so a failed spawn is recovered, not fatal.
+            self._singbox_proc = new_proc; self._stderr_handle = new_handle
         _reap_process(old_proc, old_handle)
-
     def _terminate_singbox(self) -> None:
         with self._lock:
             proc, self._singbox_proc = self._singbox_proc, None
             handle, self._stderr_handle = self._stderr_handle, None
         _reap_process(proc, handle)
-
-    # -- cloudflare tunnel (soft-optional) -------------------------------
     def _start_cloudflared(self) -> bool:
-        """Launch cloudflared for the VLESS+WS inbounds.
-
-        Soft-skips (returns False, never raises/exits) when TUNNEL_TOKEN is
-        empty or the binary is missing, so the proxy keeps working without a
-        tunnel. Ingress rules (hostnames -> 8080/8082) live in the Cloudflare
-        dashboard tunnel config, not here.
-        """
         with self._lock:
             if not self.tunnel_token:
                 self.status["tunnel"] = {"state": "no-token"}
@@ -3530,17 +2616,11 @@ class RailwayManager:
                 return False
             binary = shutil.which(self.cloudflared_bin)
             if binary is None:
-                self.status["tunnel"] = {"state": "no-binary",
-                                         "binary": self.cloudflared_bin}
-                print(f"cloudflared skipped: binary {self.cloudflared_bin!r} not found",
-                      flush=True)
+                self.status["tunnel"] = {"state": "no-binary", "binary": self.cloudflared_bin}
+                print(f"cloudflared skipped: binary {self.cloudflared_bin!r} not found", flush=True)
                 return False
             try:
-                new_proc = subprocess.Popen(
-                    [binary, "tunnel", "--no-autoupdate",
-                     "run", "--token", self.tunnel_token],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
+                new_proc = subprocess.Popen([binary, "tunnel", "--no-autoupdate", "run", "--token", self.tunnel_token], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except OSError as exc:
                 self.status["tunnel"] = {"state": "dead", "error": str(exc)}
                 return False
@@ -3549,13 +2629,11 @@ class RailwayManager:
             print("cloudflared tunnel started", flush=True)
         _reap_process(old_proc)
         return True
-
     def _terminate_cloudflared(self) -> None:
         with self._lock:
             proc, self._cloudflared_proc = self._cloudflared_proc, None
             self.status["tunnel"] = {"state": "off"}
         _reap_process(proc)
-
     def tail_singbox_stderr(self, max_lines: int = 20) -> str:
         try:
             with open(f"{self.config_path}.stderr.log", "rb") as handle:
@@ -3566,60 +2644,32 @@ class RailwayManager:
             return "\n".join(lines[-max_lines:])
         except OSError:
             return ""
-
-
 def main() -> int:
     try:
         cfg = build_config_from_env(dict(os.environ))
     except SystemExit as exc:
         return int(exc.code or 1)
     if cfg["admin_token_generated"]:
-        print(f"generated ADMIN_TOKEN={cfg['admin_token']} (save it to use /ui and /api)",
-              flush=True)
+        print(f"generated ADMIN_TOKEN={cfg['admin_token']} (save it to use /ui and /api)", flush=True)
     data_dir = cfg["data_dir"]
     os.makedirs(data_dir, exist_ok=True)
-    manager = RailwayManager(
-        port=cfg["port"],
-        mixed_port=cfg["mixed_port"],
-        username=cfg["username"],
-        password=cfg["password"],
-        admin_token=cfg["admin_token"],
-        snapshot_url=cfg["snapshot_url"],
-        snapshot_urls=cfg["snapshot_urls"],
-        refresh_seconds=cfg["refresh_seconds"],
-        limit=cfg["limit"],
-        real_topk=cfg["real_topk"],
-        dial_workers=cfg["dial_workers"],
-        full_probe_workers=cfg["full_probe_workers"],
-        probe_workers=cfg["probe_workers"],
-        dial_timeout=cfg["dial_timeout"],
-        auto_repin=cfg["auto_repin"],
-        auto_rescue=cfg["auto_rescue"],
-        health_check_interval=cfg["health_check_interval"],
-        max_mux_connections=cfg["max_mux_connections"],
-        vless_uuid=cfg["vless_uuid"],
-        vless_direct_port=cfg["vless_direct_port"],
-        vless_chain_port=cfg["vless_chain_port"],
-        tunnel_token=cfg["tunnel_token"],
-        cloudflared_bin=cfg["cloudflared_bin"],
-        disguise_path=cfg["disguise_path"],
-        config_path=os.path.join(data_dir, "singbox-railway.json"),
-        nodes_path=os.path.join(data_dir, "nodes.json"),
-        state_path=os.path.join(data_dir, "state.json"),
-        settings_path=os.path.join(data_dir, "settings.json"),
-    )
+    manager = RailwayManager(port=cfg["port"], mixed_port=cfg["mixed_port"], username=cfg["username"], password=cfg["password"],
+        admin_token=cfg["admin_token"], snapshot_url=cfg["snapshot_url"], snapshot_urls=cfg["snapshot_urls"],
+        refresh_seconds=cfg["refresh_seconds"], limit=cfg["limit"], real_topk=cfg["real_topk"], dial_workers=cfg["dial_workers"],
+        full_probe_workers=cfg["full_probe_workers"], probe_workers=cfg["probe_workers"], dial_timeout=cfg["dial_timeout"],
+        auto_rescue=cfg["auto_rescue"], health_check_interval=cfg["health_check_interval"], max_mux_connections=cfg["max_mux_connections"],
+        vless_uuid=cfg["vless_uuid"], vless_direct_port=cfg["vless_direct_port"], vless_chain_port=cfg["vless_chain_port"],
+        tunnel_token=cfg["tunnel_token"], cloudflared_bin=cfg["cloudflared_bin"], disguise_path=cfg["disguise_path"],
+        config_path=os.path.join(data_dir, "singbox-railway.json"), nodes_path=os.path.join(data_dir, "nodes.json"),
+        state_path=os.path.join(data_dir, "state.json"), settings_path=os.path.join(data_dir, "settings.json"))
     stop_event = threading.Event()
-
-    def _on_signal(signum, frame) -> None:  # noqa: ARG001
+    def _on_signal(signum, frame) -> None:
         stop_event.set()
-
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
     manager.start()
     stop_event.wait()
     manager.stop()
     return 0
-
-
 if __name__ == "__main__":
     raise SystemExit(main())
