@@ -1251,8 +1251,11 @@ class PinnedHealthTests(unittest.TestCase):
                         self.assertTrue(manager.refresh_once())
                     manager.switch(tag="vpngate-0")
 
-                    healthy = lambda host, port, timeout=5: 120
-                    self.assertEqual("pinned", manager.check_pinned_health(probe_fn=healthy))
+                    # Health is dial-only now: a live tunnel dial keeps
+                    # the pin (the probe_fn arg is ignored).
+                    with mock.patch.object(manager, "dial_fn",
+                                           return_value=120):
+                        self.assertEqual("pinned", manager.check_pinned_health())
 
                 self.assertEqual("vpngate-0", manager.preferred_tag)
             finally:
@@ -3631,7 +3634,11 @@ class ProgressivePinTests(unittest.TestCase):
                 seen: set = set()
                 deadline = time.monotonic() + 20
                 while manager._full_probe_thread.is_alive():
-                    seen.add(manager.preferred_tag)
+                    # Only sample while dials are still in flight: once
+                    # full_probe.state flips to done, _auto_pin_best may
+                    # already have committed (thread teardown window).
+                    if manager.status["full_probe"]["state"] != "done":
+                        seen.add(manager.preferred_tag)
                     if time.monotonic() > deadline:
                         break
                     time.sleep(0.05)
@@ -4875,10 +4882,8 @@ class VerifyRunningUiTests(unittest.TestCase):
 class DeadPinTests(unittest.TestCase):
     """A pinned node whose tunnel is dead must not stay pinned forever.
 
-    Covers the three chained root causes:
-    1. tie-keep must require the best node to be alive this round;
-    2. health check must redial (not just TCP-handshake) on failure;
-    3. auto-pin must verify the winner's exit IP before pinning.
+    Health is judged by real tunnel dials only — no TCP-handshake
+    shortcut (a dead tunnel keeps answering 443).
     """
 
     TOKEN = "test-admin-token-0123456789abcdef"
@@ -4956,6 +4961,55 @@ class DeadPinTests(unittest.TestCase):
         self.assertEqual("rescued", result)
         self.assertEqual("vpngate-1", manager.preferred_tag)
         self.assertIn("203.0.113.11", dial_calls)
+
+    def test_handshake_alive_but_tunnel_dead_rescues(self) -> None:
+        """TCP handshake passes but the real tunnel dial fails: the pin
+        must still be rescued (handshake alone never means alive)."""
+        dial_calls: list[str] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(
+                tmpdir,
+                dial_fn=lambda node: dial_calls.append(node["server"]) or None)
+            try:
+                self._seed_nodes(manager, ("203.0.113.11", 100, 30),
+                                 ("203.0.113.12", 200, 40))
+                manager.preferred_tag = "vpngate-0"
+                manager.status["preferred_tag"] = "vpngate-0"
+                manager.backup_tag = "vpngate-1"
+                manager.status["backup_tag"] = "vpngate-1"
+                manager._auto_pinned = True
+                healthy = lambda host, port, timeout=5: 120
+                with _fake_singbox():
+                    result = manager.check_pinned_health(probe_fn=healthy)
+            finally:
+                manager.stop()
+
+        self.assertEqual("rescued", result)
+        self.assertEqual("vpngate-1", manager.preferred_tag)
+        self.assertIn("203.0.113.11", dial_calls)
+
+    def test_tunnel_alive_stays_pinned_without_probe(self) -> None:
+        """Real tunnel dial succeeds: pin stays, and no TCP-handshake
+        probe is consulted at all."""
+        def _boom(host, port, timeout=5):
+            raise AssertionError("handshake probe must not be called")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            manager = self._manager(
+                tmpdir, dial_fn=lambda node: 66)
+            try:
+                self._seed_nodes(manager, ("203.0.113.11", 100, 30),
+                                 ("203.0.113.12", 200, 40))
+                manager.preferred_tag = "vpngate-0"
+                manager.status["preferred_tag"] = "vpngate-0"
+                manager._auto_pinned = True
+                with _fake_singbox():
+                    result = manager.check_pinned_health(probe_fn=_boom)
+            finally:
+                manager.stop()
+
+        self.assertEqual("pinned", result)
+        self.assertEqual("vpngate-0", manager.preferred_tag)
 
     def test_rescue_yields_to_manual_switch_mid_run(self) -> None:
         """A manual switch racing a slow redial+apply must win: the

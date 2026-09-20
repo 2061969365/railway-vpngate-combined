@@ -2347,8 +2347,14 @@ class RailwayManager:
                 print(f"health monitor error: {type(exc).__name__}: {exc}", flush=True)
 
     def check_pinned_health(self, probe_fn=None) -> str:
-        """Probe the pinned endpoint; rescue to the measured best after
-        3 straight failures (manual pins included)."""
+        """Dial the pinned tunnel; rescue when the dial fails.
+
+        Health is judged by a real tunnel dial ONLY -- never by a TCP
+        handshake (a dead tunnel keeps answering 443, so a handshake
+        says nothing about tunnel or exit-IP health). probe_fn is kept
+        as an accepted-but-ignored parameter so existing callers keep
+        working; it is never consulted.
+        """
         with self._lock:
             tag = self.preferred_tag
             node = next((n for n in self._nodes
@@ -2357,14 +2363,19 @@ class RailwayManager:
             round_id = self._rescue_round
         if tag is None or node is None:
             return "no-preferred"
-        check = probe_fn if probe_fn is not None else probe_tcp_latency
+        # Real dial, outside the lock (may block ~dial_timeout; holding
+        # the lock would stall /healthz and every /api/* handler).
         try:
-            latency = check(node["server"], node["server_port"], 5)
+            dial_ms = self.dial_fn(node) if self.dial_fn else None
         except Exception:
-            latency = 0
+            dial_ms = None
+        alive = dial_ms is not None and dial_ms > 0
         with self._lock:
-            if latency > 0:
+            node["real_latency_ms"] = dial_ms
+            if alive:
                 self._pinned_fail_streak = 0
+                self._record_history("health-dial-ok",
+                                     f"{tag} tunnel dial ms={dial_ms}")
                 return "pinned"
             self._pinned_fail_streak += 1
             streak = self._pinned_fail_streak
@@ -2381,36 +2392,22 @@ class RailwayManager:
                     if measured else None)
             second = ((measured[1].get("endpoint") or {}).get("tag")
                       if len(measured) > 1 else None)
-            # Fast path: on the FIRST failed handshake, redial the pinned
-            # tunnel itself. A TCP handshake says nothing about tunnel
-            # health (dead tunnels keep answering 443), so a dead redial
-            # plus an alive measured backup rescues immediately instead
-            # of waiting out PINNED_FAIL_THRESHOLD strikes (~3 min dark).
+            # Fast path: on the FIRST failed dial, rescue immediately to
+            # an alive measured backup instead of waiting out
+            # PINNED_FAIL_THRESHOLD strikes (~3 min dark).
             fast_rescue = (streak == 1 and best is not None)
             if streak < PINNED_FAIL_THRESHOLD and not fast_rescue:
                 return "pinned"
             if not fast_rescue:
                 self._pinned_fail_streak = 0
-        # Everything below runs WITHOUT the lock: dial_fn may block ~20s
-        # and _apply_config's `sing-box check` may block ~30s; holding the
-        # lock here would stall /healthz and every /api/* handler.
+        # Everything below runs WITHOUT the lock: _apply_config's
+        # `sing-box check` may block ~30s; holding the lock here would
+        # stall /healthz and every /api/* handler.
         if fast_rescue:
-            try:
-                redial_ms = self.dial_fn(node) if self.dial_fn else None
-            except Exception:
-                redial_ms = None
-            with self._lock:
-                node["real_latency_ms"] = redial_ms
-            if redial_ms is not None and redial_ms > 0:
-                with self._lock:
-                    self._pinned_fail_streak = 0
-                self._record_history("health-redial-ok",
-                                     f"{tag} handshake failed but tunnel redial ms={redial_ms}")
-                return "pinned"
             with self._lock:
                 self._pinned_fail_streak = 0
-            self._record_history("health-redial-dead",
-                                 f"{tag} redial dead, fast rescue to {best}")
+            self._record_history("health-dial-dead",
+                                 f"{tag} dial dead, fast rescue to {best}")
         with self._lock:
             if best is None:
                 self.preferred_tag = None
@@ -2427,7 +2424,7 @@ class RailwayManager:
                                  f"{tag} failed {PINNED_FAIL_THRESHOLD}x, fell back to auto")
             return "unpinned"
         if not self._apply_config(final="auto", preferred=best,
-                                  backup=second):
+                                   backup=second):
             return "pinned"
         if not self._commit_rescue(round_id, best, second):
             return "pinned"
@@ -2437,7 +2434,6 @@ class RailwayManager:
             f"{tag} failed {PINNED_FAIL_THRESHOLD}x, rescued to {best}"
             + (f" backup={second}" if second else ""))
         return "rescued"
-
     def _commit_rescue(self, round_id: int, best: str | None,
                        second: str | None) -> bool:
         """Commit a rescue pin iff no manual switch landed after
