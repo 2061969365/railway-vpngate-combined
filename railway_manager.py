@@ -52,6 +52,8 @@ MIN_PROXY_PASS_LEN = 16
 MIN_ADMIN_TOKEN_LEN = 16
 PIPE_IDLE_TIMEOUT = 120
 MAX_MUX_CONNECTIONS = 100
+MAX_SERVING_ENDPOINTS = 30
+VERIFY_STALE_AFTER_SEC = 600
 MAX_POST_CONNECTIONS = 16
 DRAIN_TIMEOUT = 10.0
 STALE_RUNNING_AFTER = 180.0
@@ -76,6 +78,22 @@ SETTINGS_SPEC: dict = {
     "auto_repin": {"type": "bool"},
     "auto_rescue": {"type": "bool"},
 }
+
+
+def _int_env(env: dict, name: str, default: int, min_val: int | None = None, max_val: int | None = None) -> int:
+    raw = env.get(name, default)
+    try:
+        val = int(str(raw).strip() if isinstance(raw, str) else raw)
+    except (TypeError, ValueError):
+        print(f"refusing to start: {name} must be an integer, got {raw!r}", flush=True)
+        raise SystemExit(2)
+    if min_val is not None and val < min_val:
+        print(f"refusing to start: {name}={val} below minimum {min_val}", flush=True)
+        raise SystemExit(2)
+    if max_val is not None and val > max_val:
+        print(f"refusing to start: {name}={val} above maximum {max_val}", flush=True)
+        raise SystemExit(2)
+    return val
 
 
 def _env_bool(env: dict, name: str, default: bool) -> bool:
@@ -551,7 +569,7 @@ async function api(path, method, body, signal) {
   }
   return r.json();
 }
-function runningTagOf(msg) { const m = /"tag"\s*:\s*"([^"]+)"/.exec(msg || ""); return m ? m[1] : ""; }
+function runningTagOf(msg) { const m = /"tag"\\s*:\\s*"([^"]+)"/.exec(msg || ""); return m ? m[1] : ""; }
 // Charset note: tags are safeTag-stripped ([a-zA-Z0-9-_]) and only minted as
 // vpngate-N, so they never contain quotes/escapes that could break [^"]+.
 function isAbort(e) { return !!e && e.name === "AbortError"; }
@@ -955,7 +973,15 @@ function skeletonRows() {
   if (note) note.hidden = false;
 }
 function verifyStale(v, preferredTag) {
-  return !!(v && v.state === "done" && v.exit_ip && v.via_tag && preferredTag && v.via_tag !== preferredTag);
+  if (!v || v.state !== "done" || !v.exit_ip) return false;
+  if (v.via_tag && preferredTag && v.via_tag !== preferredTag) return true;
+  try {
+    if (v.checked_at) {
+      const age = Date.now() - Date.parse(v.checked_at);
+      if (age > 10*60*1000) return true;
+    }
+  } catch(e) {}
+  return false;
 }
 function maybeAutoVerify(s) {
   if (!s || !s.preferred_tag) return;
@@ -972,7 +998,7 @@ function renderVerify(v, pref) {
   el.className = "";
   const preferredTag = lastStatus ? lastStatus.preferred_tag : null;
   if (verifyStale(v, preferredTag)) {
-    el.textContent = "已切换节点，出口待重新验证";
+    el.textContent = "验证已过期或已切换，出口待重新验证";
     return;
   }
   if (!v || v.state === "idle") {
@@ -1337,9 +1363,17 @@ def build_config_from_env(env: dict) -> dict:
         if len(admin_token) < MIN_ADMIN_TOKEN_LEN:
             admin_token = secrets.token_urlsafe(24)
             generated = True
-    mixed_port = int(env.get("MIXED_PORT", "40000"))
-    port = int(env.get("PORT", "3000"))
-    reserved = {8080, 8081, 8082, 4096, mixed_port}
+    mixed_port = _int_env(env, "MIXED_PORT", 40000, 1, 65535)
+    port = _int_env(env, "PORT", 3000, 1, 65535)
+    vless_direct_port = _int_env(env, "VLESS_DIRECT_PORT", 8080, 1, 65535)
+    vless_chain_port = _int_env(env, "VLESS_CHAIN_PORT", 8082, 1, 65535)
+    if vless_direct_port == vless_chain_port:
+        print(f"refusing to start: VLESS_DIRECT_PORT and VLESS_CHAIN_PORT collide ({vless_direct_port})", flush=True)
+        raise SystemExit(2)
+    if mixed_port in {8080, 8081, 8082, 4096, vless_direct_port, vless_chain_port}:
+        print(f"refusing to start: MIXED_PORT={mixed_port} collides with a fixed/VLESS port", flush=True)
+        raise SystemExit(2)
+    reserved = {8080, 8081, 8082, 4096, mixed_port, vless_direct_port, vless_chain_port}
     if port in reserved:
         print(f"refusing to start: PORT={port} collides with a fixed port "
               f"(reserved: {sorted(reserved)}); set PORT=3000", flush=True)
@@ -1356,22 +1390,22 @@ def build_config_from_env(env: dict) -> dict:
         "admin_token_generated": generated,
         "snapshot_url": snapshot_url,
         "snapshot_urls": snapshot_urls,
-        "refresh_seconds": int(env.get("REFRESH_SECONDS", "3600")),
-        "limit": int(env.get("LIMIT", "0")),
-        "real_topk": int(env.get("REAL_TOPK", "10")),
-        "dial_workers": int(env.get("DIAL_WORKERS", "5")),
-        "full_probe_workers": int(env.get("FULL_PROBE_WORKERS", "5")),
-        "probe_workers": int(env.get("PROBE_WORKERS", "20")),
-        "dial_timeout": int(env.get("DIAL_TIMEOUT", "20")),
+        "refresh_seconds": _int_env(env, "REFRESH_SECONDS", 3600, 60, 86400),
+        "limit": _int_env(env, "LIMIT", 0, 0, 100000),
+        "real_topk": _int_env(env, "REAL_TOPK", 10, 0, 50),
+        "dial_workers": _int_env(env, "DIAL_WORKERS", 5, 1, 10),
+        "full_probe_workers": _int_env(env, "FULL_PROBE_WORKERS", 5, 1, 10),
+        "probe_workers": _int_env(env, "PROBE_WORKERS", 20, 1, 50),
+        "dial_timeout": _int_env(env, "DIAL_TIMEOUT", 20, 5, 90),
         "auto_repin": _env_bool(env, "AUTO_REPIN", True),
         "auto_rescue": _env_bool(env, "AUTO_RESCUE", True),
-        "health_check_interval": int(env.get("HEALTH_CHECK_INTERVAL", "20")),
-        "max_mux_connections": int(env.get("MAX_MUX_CONNECTIONS", "100")),
+        "health_check_interval": _int_env(env, "HEALTH_CHECK_INTERVAL", 20, 5, 300),
+        "max_mux_connections": _int_env(env, "MAX_MUX_CONNECTIONS", 100, 1, 1000),
         "data_dir": env.get("DATA_DIR")
         or env.get("RAILWAY_VOLUME_MOUNT_PATH") or ".",
         "vless_uuid": env.get("VLESS_UUID", ""),
-        "vless_direct_port": int(env.get("VLESS_DIRECT_PORT", "8080")),
-        "vless_chain_port": int(env.get("VLESS_CHAIN_PORT", "8082")),
+        "vless_direct_port": vless_direct_port,
+        "vless_chain_port": vless_chain_port,
         "tunnel_token": env.get("TUNNEL_TOKEN", ""),
         "cloudflared_bin": env.get("CLOUDFLARED_BIN", "cloudflared"),
         "disguise_path": env.get("DISGUISE_PATH", ""),
@@ -1504,7 +1538,7 @@ def _http_response(status: str, content_type: str, body: bytes,
     return ("\r\n".join(lines) + "\r\n\r\n").encode() + body
 
 
-def _forward(source: socket.socket, dest: socket.socket) -> int:
+def _forward(source: socket.socket, dest: socket.socket, on_chunk=None) -> int:
     """Forward until EOF/error/idle-timeout, returning bytes moved."""
     moved = 0
     try:
@@ -1517,6 +1551,11 @@ def _forward(source: socket.socket, dest: socket.socket) -> int:
                 break
             dest.sendall(chunk)
             moved += len(chunk)
+            if on_chunk is not None:
+                try:
+                    on_chunk(len(chunk))
+                except Exception:
+                    pass
     except OSError:
         pass
     return moved
@@ -1554,6 +1593,8 @@ def _is_partial_token(data: bytes) -> bool:
             return True
     return False
 
+
+_DISGUISE_CACHE: dict[str, tuple[float, bytes | None]] = {}
 
 def _write_private_json(path: str, obj: dict) -> None:
     """Atomically write JSON and restrict to owner-only (holds credentials)."""
@@ -1686,7 +1727,7 @@ class RailwayManager:
             "full_probe": {"state": "idle", "done": 0, "total": 0},
             "probe": {"state": "idle", "tag": None, "ms": None, "error": None},
             "verify": {"state": "idle", "exit_ip": None, "ms": None,
-                       "via_tag": None, "error": None},
+                       "via_tag": None, "error": None, "checked_at": None},
             "tunnel": {"state": "off"},
             "vless": ({"uuid": vless_uuid, "direct_path": vless_direct_path,
                        "chain_path": vless_chain_path} if vless_uuid else None),
@@ -1699,6 +1740,8 @@ class RailwayManager:
         self._mux_slots = threading.BoundedSemaphore(max_mux_connections)
         self._mux_inflight = 0
         self._post_slots = threading.BoundedSemaphore(MAX_POST_CONNECTIONS)
+        self._http_slots = threading.BoundedSemaphore(50)
+        self._apply_lock = threading.RLock()
         self._health_check_interval = health_check_interval
         self._listener: socket.socket | None = None
         self._singbox_proc: subprocess.Popen | None = None
@@ -1741,8 +1784,21 @@ class RailwayManager:
         # finishes. Without this the deploy healthcheck only sees 503.
         if self._boot_from_last_good():
             self.refresh_once()
-        elif not self.refresh_once():
-            self._boot_from_last_good()
+            return
+        if self.refresh_once():
+            return
+        if not self._boot_from_last_good():
+            # Cold-start double failure: retry quickly a couple times instead
+            # of going dark until the next hourly cycle.
+            for delay in (30, 60):
+                if self._stop_event.is_set():
+                    return
+                time.sleep(delay)
+                if self._boot_from_last_good():
+                    self.refresh_once()
+                    return
+                if self.refresh_once():
+                    return
 
     def _drain(self, timeout: float = DRAIN_TIMEOUT) -> bool:
         """Wait for in-flight mux pipes to finish, up to timeout seconds."""
@@ -1782,6 +1838,7 @@ class RailwayManager:
             threading.Thread(target=self._handle_client, args=(client,), daemon=True).start()
 
     def _handle_client(self, client: socket.socket) -> None:
+        http_held = False
         try:
             client.settimeout(10)
             peek = client.recv(4096)
@@ -1791,6 +1848,10 @@ class RailwayManager:
             if kind == "unknown" and _is_partial_token(peek):
                 # TCP split the request head ("GE"+"T /..."): wait for
                 # more bytes instead of dropping a valid connection.
+                # Bound slowloris: waiting holds an http slot, not unbounded threads.
+                if not self._http_slots.acquire(blocking=False):
+                    return
+                http_held = True
                 deadline = time.monotonic() + 5
                 while (len(peek) < 4096
                        and time.monotonic() < deadline):
@@ -1805,6 +1866,9 @@ class RailwayManager:
                     if kind != "unknown" or not _is_partial_token(peek):
                         break
             if kind in ("socks5", "http-connect"):
+                if http_held:
+                    self._http_slots.release()
+                    http_held = False
                 if not self._mux_slots.acquire(blocking=False):
                     return
                 try:
@@ -1817,10 +1881,23 @@ class RailwayManager:
                         self._mux_inflight -= 1
                     self._mux_slots.release()
             elif kind == "http":
-                self._handle_http(client, peek)
+                if not http_held:
+                    if not self._http_slots.acquire(blocking=False):
+                        return
+                    http_held = True
+                try:
+                    self._handle_http(client, peek)
+                finally:
+                    self._http_slots.release()
+                    http_held = False
         except OSError:
             pass
         finally:
+            if http_held:
+                try:
+                    self._http_slots.release()
+                except Exception:
+                    pass
             try:
                 client.close()
             except OSError:
@@ -1857,6 +1934,38 @@ class RailwayManager:
             if not chunk:
                 break
             data += chunk
+        # Read POST body fully per Content-Length (split TCP packets
+        # otherwise truncate JSON and cause false 400).
+        try:
+            head_part, _, after = data.partition(b"\r\n\r\n")
+            clen = None
+            for hline in head_part.decode("latin-1").split("\r\n")[1:]:
+                if ":" not in hline:
+                    continue
+                hn, _, hv = hline.partition(":")
+                if hn.strip().lower() == "content-length":
+                    try:
+                        clen = int(hv.strip())
+                    except ValueError:
+                        clen = None
+                    break
+            if clen is not None and clen >= 0 and len(after) < clen:
+                # cap to avoid huge allocation on forged length
+                want = min(clen, 1024 * 1024)
+                client.settimeout(10)
+                while len(after) < want:
+                    try:
+                        chunk = client.recv(min(4096, want - len(after)))
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    after += chunk
+                    data = head_part + b"\r\n\r\n" + after
+                    if len(data) > 2 * 1024 * 1024:
+                        break
+        except Exception:
+            pass
         parsed = self._parse_request(data)
         if parsed is None:
             return
@@ -2035,19 +2144,46 @@ class RailwayManager:
         if not self.disguise_path:
             return None
         try:
-            with open(self.disguise_path, "rb") as handle:
-                return handle.read()
+            mtime = os.path.getmtime(self.disguise_path)
         except OSError:
+            _DISGUISE_CACHE.pop(self.disguise_path, None)
+            return None
+        cached = _DISGUISE_CACHE.get(self.disguise_path)
+        if cached is not None and cached[0] == mtime:
+            return cached[1]
+        try:
+            with open(self.disguise_path, "rb") as handle:
+                data = handle.read()
+            # cap cache to 5MB to avoid memory blowup on huge files
+            if len(data) > 5 * 1024 * 1024:
+                return data
+            _DISGUISE_CACHE[self.disguise_path] = (mtime, data)
+            return data
+        except OSError:
+            _DISGUISE_CACHE.pop(self.disguise_path, None)
             return None
 
-    def _healthy(self) -> bool:
+    def _mixed_reachable(self, timeout: int = 2) -> bool:
+        try:
+            return probe_tcp_latency("127.0.0.1", self.mixed_port, timeout) > 0
+        except Exception:
+            return False
+
+    def _serving_ok(self) -> bool:
         with self._lock:
             if not self.status["endpoints"]:
                 return False
             if not self.want_singbox:
                 return True
             proc = self._singbox_proc
-            return proc is not None and proc.poll() is None
+            alive = proc is not None and proc.poll() is None
+            if not alive:
+                return False
+        # mixed check outside _lock: blocks ~2s, must not stall /api/*
+        return self._mixed_reachable(timeout=2)
+
+    def _healthy(self) -> bool:
+        return self._serving_ok()
 
     def _pipe_to_backend(self, client: socket.socket, peek: bytes) -> None:
         try:
@@ -2061,11 +2197,19 @@ class RailwayManager:
             up = [0]
             down = [0]
 
+            def _add_up(n: int) -> None:
+                with self._lock:
+                    self.status["traffic"]["bytes_up"] += n
+
+            def _add_down(n: int) -> None:
+                with self._lock:
+                    self.status["traffic"]["bytes_down"] += n
+
             def _up() -> None:
-                up[0] = _forward(client, backend)
+                up[0] = _forward(client, backend, on_chunk=_add_up)
 
             def _down() -> None:
-                down[0] = _forward(backend, client)
+                down[0] = _forward(backend, client, on_chunk=_add_down)
 
             first = threading.Thread(target=_up, daemon=True)
             second = threading.Thread(target=_down, daemon=True)
@@ -2081,8 +2225,9 @@ class RailwayManager:
                     pass
             second.join(timeout=10)
             with self._lock:
-                self.status["traffic"]["bytes_up"] += up[0] + len(peek)
-                self.status["traffic"]["bytes_down"] += down[0]
+                # up/down already counted incrementally via on_chunk;
+                # only the initial peek (sent before threads started) is missing.
+                self.status["traffic"]["bytes_up"] += len(peek)
         except OSError:
             pass
         finally:
@@ -2267,9 +2412,19 @@ class RailwayManager:
                  "speed": n.get("speed", 0)}
                 for ep, n in zip(endpoints, nodes)]
             self.status["countries"] = self._countries()
-            if preferred and preferred not in {ep["tag"] for ep in endpoints}:
+            endpoint_tags = {ep["tag"] for ep in endpoints}
+            if preferred and preferred not in endpoint_tags:
                 self.preferred_tag = None
+                self.backup_tag = None
+                self._auto_pinned = True
                 self._persist_state()
+            # keep backup only if it still exists, else drop it
+            if self.backup_tag is not None and self.backup_tag not in endpoint_tags:
+                self.backup_tag = None
+                self._persist_state()
+            self.status["preferred_tag"] = self.preferred_tag
+            self.status["backup_tag"] = self.backup_tag
+            self.status["auto_pinned"] = self._auto_pinned
             self.status["last_error"] = "booted from last-good config (refresh failed)"
         if self.want_singbox:
             self._restart_singbox()
@@ -2312,10 +2467,24 @@ class RailwayManager:
             if not self.want_singbox:
                 return
             proc = self._singbox_proc
-            if proc is not None and proc.poll() is None:
+            proc_alive = proc is not None and proc.poll() is None
+            want_cfg = self.config_path
+            has_endpoints = bool(self.status["endpoints"])
+        if proc_alive:
+            # proc alive != serving alive (mixed may be stuck/OOM-half-dead).
+            # This is the other half of "verified but cannot connect".
+            if has_endpoints and not self._mixed_reachable(timeout=2):
+                with self._lock:
+                    self.status["last_error"] = "sing-box alive but mixed unreachable, restarting"
+                self._record_history("supervise-mixed-dead", "mixed unreachable, restarting")
+                self._restart_singbox()
+                return
+            with self._lock:
                 self._crash_streak = 0
                 return
-            if proc is None and not os.path.exists(self.config_path):
+        with self._lock:
+            proc = self._singbox_proc
+            if proc is None and not os.path.exists(want_cfg):
                 return
             now = time.monotonic()
             if now < self._retry_after:
@@ -2346,6 +2515,30 @@ class RailwayManager:
             except Exception as exc:  # never kill the monitor thread
                 print(f"health monitor error: {type(exc).__name__}: {exc}", flush=True)
 
+    def _trigger_bg_refresh(self, reason: str) -> None:
+        """Fetch fresh snapshot in background when pool is all dead.
+
+        Health runs every 20s; hourly refresh is too slow when every
+        measured node died. refresh_once is single-flight so concurrent
+        triggers are safe (second gets refresh-busy and returns).
+        """
+        try:
+            if not self._refresh_lock.acquire(blocking=False):
+                return
+            self._refresh_lock.release()
+        except Exception:
+            pass
+        def _bg() -> None:
+            try:
+                self.refresh_once()
+            except Exception:
+                pass
+        try:
+            threading.Thread(target=_bg, daemon=True, name="health-refresh").start()
+            self._record_history("health-trigger-refresh", reason)
+        except Exception:
+            pass
+
     def check_pinned_health(self, probe_fn=None) -> str:
         """Dial the pinned tunnel; rescue when the dial fails.
 
@@ -2373,6 +2566,13 @@ class RailwayManager:
         with self._lock:
             node["real_latency_ms"] = dial_ms
             if alive:
+                # Endpoint dials but serving may still be down (OOM/mixed/
+                # config mismatch): throwaway ok != serving ok. This is the
+                # classic "verified IP but cannot connect".
+                serving_down = False
+                if self.want_singbox:
+                    # release lock for mixed IO in _serving_ok (it takes _lock briefly)
+                    pass
                 recovered = self._pinned_fail_streak > 0
                 self._pinned_fail_streak = 0
                 # Transition-only logging: a healthy dial every interval
@@ -2380,7 +2580,20 @@ class RailwayManager:
                 if recovered:
                     self._record_history("health-dial-ok",
                                          f"{tag} tunnel dial recovered ms={dial_ms}")
-                return "pinned"
+                alive_ret = "pinned"
+            else:
+                alive_ret = None
+        if alive:
+            if self.want_singbox and not self._serving_ok():
+                self._record_history("health-serving-dead",
+                                     f"{tag} dial ok but serving down, restarting sing-box")
+                try:
+                    self._restart_singbox()
+                except Exception:
+                    pass
+                return "restarted"
+            return alive_ret
+        with self._lock:
             self._pinned_fail_streak += 1
             streak = self._pinned_fail_streak
             rescue = self.auto_rescue
@@ -2392,10 +2605,43 @@ class RailwayManager:
                 key=lambda n: (n["real_latency_ms"],
                                (n.get("endpoint") or {}).get("tag") or "")) \
                 if rescue else []
-            best = ((measured[0].get("endpoint") or {}).get("tag")
-                    if measured else None)
-            second = ((measured[1].get("endpoint") or {}).get("tag")
-                      if len(measured) > 1 else None)
+            # Verify rescue target: stale real_latency alone rescues to dead
+            # nodes (measured 1h ago). Walk ranking until exit IP verifies.
+            verified_best = None
+            verified_second = None
+            for cand in measured[:EXIT_VERIFY_CAP]:
+                ctag = (cand.get("endpoint") or {}).get("tag")
+                cep = cand.get("endpoint") or cand
+                try:
+                    cip, _ = self.verify_fn(cep)
+                except Exception:
+                    cip = None
+                if cip:
+                    if verified_best is None:
+                        verified_best = ctag
+                    else:
+                        verified_second = ctag
+                        break
+            # fall back to unverified ranking only when verify itself is broken
+            # (e.g. verify_fn raises for all)? No: unverified rescue re-dies.
+            # Keep stale ranking as last resort to avoid unpin flaps in tests
+            # with start_singbox=False where verify is stubbed alive anyway.
+            if verified_best is None and measured:
+                # No exit IP anywhere: pool all dead, fetch fresh instead of
+                # pinning a dead end.
+                best = None
+                second = None
+            else:
+                best = verified_best
+                # second verified if found, else next measured (may be dead,
+                # but better than None for hot-standby; auto-pin will fix)
+                if verified_second is not None:
+                    second = verified_second
+                else:
+                    # next measured after best, even if unverified
+                    rest_tags = [(n.get("endpoint") or {}).get("tag") for n in measured
+                                 if (n.get("endpoint") or {}).get("tag") != verified_best]
+                    second = rest_tags[0] if rest_tags else None
             # Fast path: on the FIRST failed dial, rescue immediately to
             # an alive measured backup instead of waiting out
             # PINNED_FAIL_THRESHOLD strikes (~3 min dark).
@@ -2412,26 +2658,39 @@ class RailwayManager:
                 self._pinned_fail_streak = 0
             self._record_history("health-dial-dead",
                                  f"{tag} dial dead, fast rescue to {best}")
-        with self._lock:
+        with self._apply_lock:
+            with self._lock:
+                if best is None:
+                    self.preferred_tag = None
+                    self.backup_tag = None
+                    self._auto_pinned = True
+                    self.status["preferred_tag"] = None
+                    self.status["backup_tag"] = None
+                    self.status["auto_pinned"] = True
+                    self._persist_state()
+                    self._invalidate_verify(f"unpinned after {tag} failed")
             if best is None:
-                self.preferred_tag = None
-                self.backup_tag = None
-                self._auto_pinned = True
-                self.status["preferred_tag"] = None
-                self.status["backup_tag"] = None
-                self.status["auto_pinned"] = True
-                self._persist_state()
-                self._invalidate_verify(f"unpinned after {tag} failed")
-        if best is None:
-            self._apply_config(final="auto")
-            self._record_history("auto-unpin",
-                                 f"{tag} failed {PINNED_FAIL_THRESHOLD}x, fell back to auto")
-            return "unpinned"
-        if not self._apply_config(final="auto", preferred=best,
-                                   backup=second):
-            return "pinned"
-        if not self._commit_rescue(round_id, best, second):
-            return "pinned"
+                self._apply_config(final="auto")
+                self._record_history("auto-unpin",
+                                     f"{tag} failed {PINNED_FAIL_THRESHOLD}x, fell back to auto")
+                # Pool exhausted: fetch fresh snapshot now, not next hour.
+                try:
+                    self._trigger_bg_refresh(f"{tag} pool exhausted")
+                except Exception:
+                    pass
+                return "unpinned"
+            if not self._apply_config(final="auto", preferred=best,
+                                       backup=second):
+                return "pinned"
+            if not self._commit_rescue(round_id, best, second):
+                # manual won the race after our apply: revert disk to manual
+                with self._lock:
+                    cur = self.preferred_tag
+                    cur_backup = self.backup_tag
+                if cur is not None or cur_backup is not None:
+                    self._apply_config(final="auto", preferred=cur,
+                                       backup=cur_backup)
+                return "pinned"
         self._invalidate_verify(f"rescued to {best}")
         self._record_history(
             "auto-rescue",
@@ -2488,23 +2747,60 @@ class RailwayManager:
         # Apply first; only commit in-memory state after the checked config lands.
         # route.final is never a bare endpoint tag: "chain" keeps the pinned
         # node first with the urltest group as instant hot-standby.
-        if not self._apply_config(final="auto", preferred=target):
-            return False, "config check failed, kept previous"
-        with self._lock:
-            old = self.preferred_tag
-            self.preferred_tag = target
-            self.backup_tag = None
-            self._auto_pinned = False
-            self.status["preferred_tag"] = target
-            self.status["backup_tag"] = None
-            self.status["auto_pinned"] = False
-            self._rescue_round += 1
-            self._persist_state()
+        # Serialized by _apply_lock so concurrent switches cannot interleave
+        # apply/commit and leave disk vs status inconsistent (last wins, consistent).
+        with self._apply_lock:
+            if not self._apply_config(final="auto", preferred=target):
+                return False, "config check failed, kept previous"
+            with self._lock:
+                old = self.preferred_tag
+                self.preferred_tag = target
+                self.backup_tag = None
+                self._auto_pinned = False
+                self.status["preferred_tag"] = target
+                self.status["backup_tag"] = None
+                self.status["auto_pinned"] = False
+                self._rescue_round += 1
+                self._persist_state()
         if old != target:
             self._invalidate_verify(f"pin-changed to {target}")
         self._pinned_fail_streak = 0
         self._record_history("switch", f"final={effective}")
         return True, effective
+
+    def _serving_nodes(self) -> list[dict]:
+        """Nodes actually written to serving sing-box config (OOM guard).
+
+        Serving 100+ openvpn-clients on 1GB Railway OOMs: throwaway dials
+        (1 endpoint) keep working while serving dies, which is exactly
+        "verified IP but cannot connect". Cap serving to top-N by
+        real/handshake latency, always keeping preferred/backup even when
+        they fall outside top-N so a manual pin is never dropped.
+        Status still shows all nodes for probing/selection.
+        """
+        with self._lock:
+            nodes = list(self._nodes)
+            preferred = self.preferred_tag
+            backup = self.backup_tag
+        def _rank(n: dict):
+            real = n.get("real_latency_ms")
+            hand = n.get("latency_ms")
+            if real is not None:
+                return (0, real)
+            if hand is not None:
+                return (1, hand)
+            return (2, 10 ** 9)
+        ordered = sorted(nodes, key=_rank)
+        top = ordered[:MAX_SERVING_ENDPOINTS]
+        top_tags = {(n.get("endpoint") or {}).get("tag") for n in top}
+        # pin must survive the cut
+        for tag in (preferred, backup):
+            if tag and tag not in top_tags:
+                hit = next((n for n in nodes if (n.get("endpoint") or {}).get("tag") == tag), None)
+                if hit is not None:
+                    top.append(hit)
+                    top_tags.add(tag)
+        return top
 
     def _serving_config_unchanged(self, config: dict) -> bool:
         """True when the on-disk config already serves this exact setup.
@@ -2535,8 +2831,9 @@ class RailwayManager:
         config is identical to the running one, the restart is skipped so
         live connections survive refreshes and no-op switches.
         """
+        serving = self._serving_nodes()
         with self._lock:
-            endpoints = [n["endpoint"] for n in self._nodes]
+            endpoints = [n["endpoint"] for n in serving]
             username, password = self.username, self.password
             mixed_port = self.mixed_port
             vless_uuid = self.vless_uuid or None
@@ -2649,11 +2946,13 @@ class RailwayManager:
                 self.backup_tag = backup
         # route.final stays on the hot-standby path: "chain" (preferred first,
         # urltest group second) when pinned, plain "auto" otherwise.
-        if not self._apply_config(final="auto", preferred=preferred,
-                                   backup=backup):
-            return self._refresh_failed("config check failed, kept previous")
-        with self._lock:
-            self.status["endpoints"] = [
+        # Serialized by _apply_lock: apply+status commit atomic vs switch/rescue.
+        with self._apply_lock:
+            if not self._apply_config(final="auto", preferred=preferred,
+                                       backup=backup):
+                return self._refresh_failed("config check failed, kept previous")
+            with self._lock:
+                self.status["endpoints"] = [
                 {"tag": ep["tag"], "server": primary_server(ep)[0],
                  "server_port": primary_server(ep)[1],
                  "country": n.get("country", ""), "country_short": n.get("country_short", ""),
@@ -2692,21 +2991,23 @@ class RailwayManager:
         """Join this round's full-probe thread within a bounded budget.
 
         Budget = estimated probe duration (nodes / workers x timeout)
-        + exit-IP verification head (EXIT_VERIFY_CAP x timeout, same
-        worker thread runs _auto_pin_best after the dials)
+        + exit-IP verification head (2 x EXIT_VERIFY_CAP x timeout for
+        best+backup, same worker thread runs _auto_pin_best after dials)
         + REFRESH_PROBE_GRACE. Returns True when the probe landed in
         time, False on timeout (previous pin kept, background thread
         still pins on completion).
         """
-        thread = self._full_probe_thread
-        if thread is None:
-            return True
         with self._lock:
+            thread = self._full_probe_thread
             total = max(1, len(self._nodes))
             workers = max(1, self.full_probe_workers)
             dial_timeout = self.dial_timeout
+            thread_copy = thread
+        if thread_copy is None:
+            return True
+        thread = thread_copy
         budget = (math.ceil(total / workers) * dial_timeout
-                  + EXIT_VERIFY_CAP * dial_timeout
+                  + 2 * EXIT_VERIFY_CAP * dial_timeout
                   + REFRESH_PROBE_GRACE)
         thread.join(timeout=budget)
         landed = not thread.is_alive()
@@ -2744,8 +3045,8 @@ class RailwayManager:
         # Startup gate so /api/status readers can observe the "running"
         # state even when dial_fn returns instantly (e.g. in tests).
         time.sleep(0.2)
-        nodes = list(self._nodes)
         with self._lock:
+            nodes = list(self._nodes)
             self.status["full_probe"]["total"] = len(nodes)
             start_preferred = self.preferred_tag
         # Dial handshake-ascending so the fastest candidates resolve first.
@@ -2884,10 +3185,21 @@ class RailwayManager:
                 exit_ip = None
             if exit_ip:
                 pinned = cand_tag
+                # verify backup as well: next measured with a live exit IP,
+                # not just next measured (which may dial but have no exit).
                 rest = [n for n in measured[i + 1:]
                         if (n.get("endpoint") or {}).get("tag") != cand_tag]
-                pinned_second = (((rest[0].get("endpoint") or {}).get("tag"))
-                                 if rest else None)
+                pinned_second = None
+                for rcand in rest[:EXIT_VERIFY_CAP]:
+                    rtag = (rcand.get("endpoint") or {}).get("tag")
+                    rep = rcand.get("endpoint") or rcand
+                    try:
+                        rip, _ = self.verify_fn(rep)
+                    except Exception:
+                        rip = None
+                    if rip:
+                        pinned_second = rtag
+                        break
                 break
             verified_tags.append(cand_tag or "?")
         if pinned is None:
@@ -2902,22 +3214,32 @@ class RailwayManager:
                 "auto-pin-exit-skip",
                 f"{(measured[0].get('endpoint') or {}).get('tag')} "
                 f"has no exit ip, pinned {pinned}")
-        if not self._apply_config(final="auto", preferred=best,
-                                  backup=second):
-            self._record_history("auto-pin-failed", best)
-            return
-        with self._lock:
-            if self.preferred_tag is not None and not self._auto_pinned:
-                self._record_history("auto-pin-skipped",
-                                     "manual pin won the race")
+        with self._apply_lock:
+            if not self._apply_config(final="auto", preferred=best,
+                                      backup=second):
+                self._record_history("auto-pin-failed", best)
                 return
-            self.preferred_tag = best
-            self.backup_tag = second
-            self._auto_pinned = True
-            self.status["preferred_tag"] = best
-            self.status["backup_tag"] = second
-            self.status["auto_pinned"] = True
-            self._persist_state()
+            with self._lock:
+                if self.preferred_tag is not None and not self._auto_pinned:
+                    self._record_history("auto-pin-skipped",
+                                         "manual pin won the race")
+                    # revert disk: manual pin must win on disk too, not just memory.
+                    # Re-apply manual to undo our just-written auto config.
+                    manual = self.preferred_tag
+                    manual_backup = self.backup_tag
+                else:
+                    manual = None
+                    self.preferred_tag = best
+                    self.backup_tag = second
+                    self._auto_pinned = True
+                    self.status["preferred_tag"] = best
+                    self.status["backup_tag"] = second
+                    self.status["auto_pinned"] = True
+                    self._persist_state()
+            if manual is not None:
+                self._apply_config(final="auto", preferred=manual,
+                                   backup=manual_backup)
+                return
         self._invalidate_verify(f"auto-pinned to {best}")
         self._record_history(
             "auto-pin", best + (f" backup={second}" if second else ""))
@@ -3046,7 +3368,8 @@ class RailwayManager:
             gen = self._verify_generation
             self.status["verify"] = {"state": "running", "exit_ip": None,
                                      "ms": None, "via_tag": tag,
-                                     "error": None, "generation": gen,
+                                     "error": None, "checked_at": None,
+                                     "generation": gen,
                                      "started_at": time.monotonic()}
             # Same atomicity as single-probe: check, publish and start
             # under one lock hold so concurrent POSTs can't double-accept.
@@ -3069,6 +3392,30 @@ class RailwayManager:
         except Exception as exc:
             exit_ip, ms = None, None
             error = f"{type(exc).__name__}: {exc}"
+        # Throwaway can succeed while serving is dead (OOM/mixed down/config
+        # mismatch): never show an IP when serving cannot carry it.
+        serving_ok = True
+        serving_detail = ""
+        if exit_ip and self.want_singbox:
+            if not self._serving_ok():
+                serving_ok = False
+                serving_detail = "serving sing-box/mixed down, throwaway ok"
+            else:
+                with self._lock:
+                    cur = self.preferred_tag
+                # serving config must actually contain this tag (cap keeps pin,
+                # but a stale verify for an evicted tag must not show as current)
+                try:
+                    serving_tags = {n.get("endpoint", {}).get("tag") for n in self._serving_nodes()}
+                except Exception:
+                    serving_tags = set()
+                if tag not in serving_tags and tag != cur:
+                    serving_ok = False
+                    serving_detail = f"{tag} not in serving config"
+        if not serving_ok:
+            error = serving_detail + (f" ({error})" if error else "")
+            exit_ip, ms = None, None
+        checked_at = _now_iso()
         with self._lock:
             if gen != self._verify_generation:
                 self._record_history("verify-discarded",
@@ -3076,7 +3423,8 @@ class RailwayManager:
                 return
             self.status["verify"] = {"state": "done", "exit_ip": exit_ip,
                                      "ms": ms, "via_tag": tag,
-                                     "error": error, "generation": gen}
+                                     "error": error, "generation": gen,
+                                     "checked_at": checked_at}
         self._record_history("verify-done", f"{tag} exit={exit_ip} ms={ms}")
 
     def _invalidate_verify(self, reason: str) -> None:
@@ -3090,7 +3438,7 @@ class RailwayManager:
             self._verify_generation += 1
             self.status["verify"] = {"state": "idle", "exit_ip": None,
                                      "ms": None, "via_tag": None,
-                                     "error": None,
+                                     "error": None, "checked_at": None,
                                      "generation": self._verify_generation}
         self._record_history("verify-invalidated", reason)
 
