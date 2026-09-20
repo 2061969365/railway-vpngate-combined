@@ -1186,12 +1186,12 @@ class PinnedHealthTests(unittest.TestCase):
                     by_server["203.0.113.13"]["real_latency_ms"] = 50
 
                     failing = lambda host, port, timeout=5: 0
-                    # Dead tunnel: the first failed handshake redials and
-                    # fast-rescues immediately (no 3-strike wait). The
-                    # rescue path commits under the round-scoped guard, so
-                    # a manual pin with no mid-round switch is rescued
-                    # (operator can see auto-rescue in history and switch
-                    # back); only a switch AFTER the round started wins.
+                    # Dead tunnel: the first failed dial fast-rescues
+                    # immediately (no 3-strike wait). The rescue path
+                    # commits under the round-scoped guard, so a manual
+                    # pin with no mid-round switch is rescued (operator
+                    # can see auto-rescue in history and switch back);
+                    # only a switch AFTER the round started wins.
                     with mock.patch.object(manager, "dial_fn",
                                            return_value=None):
                         self.assertEqual("rescued", manager.check_pinned_health(probe_fn=failing))
@@ -4223,7 +4223,7 @@ class VerifyAttributionTests(unittest.TestCase):
             failing = lambda host, port, timeout=5: 0
             with _fake_singbox(), \
                  mock.patch.object(manager, "dial_fn", return_value=None):
-                # Dead tunnel redial on an auto pin: first failure
+                # Dead tunnel dial on an auto pin: first failure
                 # fast-rescues.
                 result = manager.check_pinned_health(probe_fn=failing)
             snap = manager.status["verify"]
@@ -4936,9 +4936,9 @@ class DeadPinTests(unittest.TestCase):
                              "pins unchanged" in e.get("detail", "")
                              for e in manager.status["refresh_history"]))
 
-    def test_health_failure_triggers_redial_and_fast_rescue(self) -> None:
-        """First failed handshake triggers a tunnel redial; redial dead
-        switches to the alive backup immediately (no 3-strike wait)."""
+    def test_health_failure_triggers_dial_and_fast_rescue(self) -> None:
+        """First failed dial rescues to the alive backup immediately
+        (no 3-strike wait)."""
         dial_calls: list[str] = []
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self._manager(
@@ -4991,8 +4991,11 @@ class DeadPinTests(unittest.TestCase):
     def test_tunnel_alive_stays_pinned_without_probe(self) -> None:
         """Real tunnel dial succeeds: pin stays, and no TCP-handshake
         probe is consulted at all."""
-        def _boom(host, port, timeout=5):
-            raise AssertionError("handshake probe must not be called")
+        probe_calls: list[tuple] = []
+
+        def _recording_probe(host, port, timeout=5):
+            probe_calls.append((host, port))
+            return 120
 
         with tempfile.TemporaryDirectory() as tmpdir:
             manager = self._manager(
@@ -5004,15 +5007,17 @@ class DeadPinTests(unittest.TestCase):
                 manager.status["preferred_tag"] = "vpngate-0"
                 manager._auto_pinned = True
                 with _fake_singbox():
-                    result = manager.check_pinned_health(probe_fn=_boom)
+                    result = manager.check_pinned_health(
+                        probe_fn=_recording_probe)
             finally:
                 manager.stop()
 
         self.assertEqual("pinned", result)
         self.assertEqual("vpngate-0", manager.preferred_tag)
+        self.assertEqual([], probe_calls)
 
     def test_rescue_yields_to_manual_switch_mid_run(self) -> None:
-        """A manual switch racing a slow redial+apply must win: the
+        """A manual switch racing a slow dial+apply must win: the
         rescue commits nothing and reports the pin as kept.
 
         Simulates the race deterministically: _commit_rescue is hooked
@@ -5185,12 +5190,11 @@ class RescueRoundTests(unittest.TestCase):
     def test_rescue_round_increments_per_check(self) -> None:
         """Each health check opens a new round id (monotonic)."""
         with tempfile.TemporaryDirectory() as tmpdir:
-            manager = self._manager(tmpdir)
+            manager = self._manager(tmpdir, dial_fn=lambda node: 66)
             try:
                 self._seed_nodes(manager, ("203.0.113.11", 100, 30))
                 first = self._round_id(manager)
-                manager.check_pinned_health(
-                    probe_fn=lambda host, port, timeout=5: 120)
+                manager.check_pinned_health()
                 second = self._round_id(manager)
             finally:
                 manager.stop()

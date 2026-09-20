@@ -2373,9 +2373,13 @@ class RailwayManager:
         with self._lock:
             node["real_latency_ms"] = dial_ms
             if alive:
+                recovered = self._pinned_fail_streak > 0
                 self._pinned_fail_streak = 0
-                self._record_history("health-dial-ok",
-                                     f"{tag} tunnel dial ms={dial_ms}")
+                # Transition-only logging: a healthy dial every interval
+                # would otherwise evict the 20-entry history in ~7min.
+                if recovered:
+                    self._record_history("health-dial-ok",
+                                         f"{tag} tunnel dial recovered ms={dial_ms}")
                 return "pinned"
             self._pinned_fail_streak += 1
             streak = self._pinned_fail_streak
@@ -2431,7 +2435,7 @@ class RailwayManager:
         self._invalidate_verify(f"rescued to {best}")
         self._record_history(
             "auto-rescue",
-            f"{tag} failed {PINNED_FAIL_THRESHOLD}x, rescued to {best}"
+            f"{tag} dial failed, rescued to {best}"
             + (f" backup={second}" if second else ""))
         return "rescued"
     def _commit_rescue(self, round_id: int, best: str | None,
