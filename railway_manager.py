@@ -1549,7 +1549,7 @@ class RailwayManager:
         self._cloudflared_proc = None; self.preferred_tag = None; self.backup_tag = None; self._auto_pinned = False
         self._nodes: list[dict] = []; self._first_seen: dict[str, str] = {}
         self._cpu_model = _cpu_model(); self._cpu_cores = os.cpu_count(); self._cpu_last = None
-        self._fail_streak = 0; self._pinned_fail_streak = 0; self._rescue_round = 0; self._crash_streak = 0; self._retry_after = 0.0; self._mixed_fail_streak = 0; self._mixed_retry_after = 0.0
+        self._fail_streak = 0; self._pinned_fail_streak = 0; self._rescue_round = 0; self._crash_streak = 0; self._retry_after = 0.0; self._mixed_fail_streak = 0; self._mixed_retry_after = 0.0; self._health_mixed_streak = 0; self._refresh_generation = 0
         self._lock = threading.RLock(); self._refresh_lock = threading.Lock(); self._config_lock = threading.Lock()
         self.status: dict = {"endpoints": [], "countries": [], "preferred_tag": None, "backup_tag": None, "auto_pinned": False,
             "refresh_history": [], "refresh_ok": 0, "refresh_fail": 0, "last_refresh": None, "last_error": None, "started_at": None,
@@ -1582,16 +1582,19 @@ class RailwayManager:
         return self.bound_port
     def _initial_refresh(self) -> None:
         if self._boot_from_last_good():
-            self.refresh_once()
+            self._start_refresh_bg()
             return
-        if self.refresh_once():
+        if self._start_refresh_bg():
             return
         if not self._boot_from_last_good():
             for delay in (30,):
                 if self._stop_event.is_set():
                     return
                 time.sleep(delay)
-                if self._boot_from_last_good() or self.refresh_once():
+                if self._boot_from_last_good():
+                    self._start_refresh_bg()
+                    return
+                if self._start_refresh_bg():
                     return
     def _drain(self, timeout: float = DRAIN_TIMEOUT) -> bool:
         deadline = time.monotonic() + max(0.0, timeout)
@@ -2076,7 +2079,7 @@ class RailwayManager:
         next_run = time.monotonic() + self._effective_interval() + random.uniform(-30, 30)
         while not self._stop_event.wait(max(0.0, next_run - time.monotonic())):
             try:
-                self.refresh_once()
+                self._start_refresh_bg()
             except Exception as exc:
                 print(f"refresh loop error: {type(exc).__name__}: {exc}", flush=True)
             next_run = time.monotonic() + self._effective_interval() + random.uniform(-30, 30)
@@ -2138,6 +2141,10 @@ class RailwayManager:
             self._start_cloudflared()
 
     def _note_mixed_down(self, reason: str) -> str:
+        # NOTE: health and supervise share _mixed_retry_after/_crash_streak
+        # backoff but keep separate miss counters (_health_mixed_streak vs
+        # _mixed_fail_streak) so a 10s-supervise + 20s-health coincidence
+        # cannot fuse into an instant 2x restart.
         """Gated serving-down handling shared by health checks.
 
         A single 2s mixed miss (GC/refresh burst) must not restart serving:
@@ -2145,8 +2152,8 @@ class RailwayManager:
         "restarted" when a restart was issued, else "watching".
         """
         with self._lock:
-            self._mixed_fail_streak += 1
-            streak = self._mixed_fail_streak
+            self._health_mixed_streak += 1
+            streak = self._health_mixed_streak
             now = time.monotonic()
             if streak < 2 or now < self._mixed_retry_after:
                 if streak == 1:
@@ -2162,7 +2169,7 @@ class RailwayManager:
         except Exception:
             pass
         with self._lock:
-            self._mixed_fail_streak = 0
+            self._health_mixed_streak = 0
         return "restarted"
 
     def _health_monitor_loop(self) -> None:
@@ -2173,21 +2180,11 @@ class RailwayManager:
                 print(f"health monitor error: {type(exc).__name__}: {exc}", flush=True)
     def _trigger_bg_refresh(self, reason: str) -> None:
         try:
-            if not self._refresh_lock.acquire(blocking=False):
-                return
-            self._refresh_lock.release()
+            started = self._start_refresh_bg()
         except Exception:
-            pass
-        def _bg() -> None:
-            try:
-                self.refresh_once()
-            except Exception:
-                pass
-        try:
-            threading.Thread(target=_bg, daemon=True, name="health-refresh").start()
+            return
+        if started:
             self._record_history("health-trigger-refresh", reason)
-        except Exception:
-            pass
     def _fresh_probe_tags(self, cands: list[dict]) -> list[str]:
         """Fresh-handshake filter for rescue targets (bounded, parallel).
 
@@ -2198,6 +2195,7 @@ class RailwayManager:
         if not short:
             return []
         alive: dict[str, int] = {}
+        alive_lock = threading.Lock()
         def _one(node: dict) -> None:
             try:
                 host, port = primary_server(node.get("endpoint") or node)
@@ -2205,7 +2203,7 @@ class RailwayManager:
             except Exception:
                 ms = 0
             if ms and ms > 0:
-                with self._lock:
+                with alive_lock:
                     alive[((node.get("endpoint") or {}).get("tag"))] = ms
         with ThreadPoolExecutor(max_workers=min(len(short), 3)) as ex:
             list(ex.map(_one, short))
@@ -2345,9 +2343,10 @@ class RailwayManager:
                 self._config_lock.release()
             except Exception:
                 pass
+        with self._lock:
+            self._pinned_fail_streak = 0
         if old != target:
             self._invalidate_verify(f"pin-changed to {target}")
-        self._pinned_fail_streak = 0
         self._record_history("switch", f"final={effective}")
         return True, effective
     def _serving_nodes(self) -> list[dict]:
@@ -2436,22 +2435,32 @@ class RailwayManager:
             if cur.get("state") == "running" and self._refresh_thread is not None and self._refresh_thread.is_alive():
                 if time.monotonic() - cur.get("started_at", 0.0) < STALE_RUNNING_AFTER:
                     return False
-            self.status["refresh_job"] = {"state": "running", "started_at": time.monotonic(), "ok": None, "error": None}
-            thread = threading.Thread(target=self._run_refresh_bg, daemon=True, name="refresh-bg")
+            self._refresh_generation += 1
+            gen = self._refresh_generation
+            self.status["refresh_job"] = {"state": "running", "started_at": time.monotonic(), "ok": None, "error": None, "generation": gen}
+            thread = threading.Thread(target=self._run_refresh_bg, args=(gen,), daemon=True, name="refresh-bg")
             self._refresh_thread = thread
             thread.start()
         return True
 
-    def _run_refresh_bg(self) -> None:
+    def _run_refresh_bg(self, gen: int) -> None:
         try:
             ok = self.refresh_once()
-            err = None if ok else (self.status.get("last_error") or "refresh failed")
+            with self._lock:
+                err = None if ok else (self.status.get("last_error") or "refresh failed")
         except Exception as exc:
             ok, err = False, f"{type(exc).__name__}: {exc}"
         with self._lock:
+            if gen != self._refresh_generation:
+                return
+            if self._refresh_thread is not None and self._refresh_thread is not threading.current_thread():
+                return
+            cur = self.status.get("refresh_job") or {}
+            if cur.get("generation") is not None and cur.get("generation") != gen:
+                return
             self.status["refresh_job"] = {"state": "done",
-                "started_at": (self.status.get("refresh_job") or {}).get("started_at"),
-                "ok": ok, "error": err}
+                "started_at": cur.get("started_at"),
+                "ok": ok, "error": err, "generation": gen}
 
     def refresh_once(self, fetcher=None, probe_pool: int = 0) -> bool:
         if not self._refresh_lock.acquire(blocking=False):
@@ -2495,6 +2504,10 @@ class RailwayManager:
             if backup != self.backup_tag:
                 self.backup_tag = backup
         with self._config_lock:
+            with self._lock:
+                preferred = self.preferred_tag
+                backup = self.backup_tag if (self.backup_tag in tags) else None
+                self.backup_tag = backup
             if not self._apply_config(final="auto", preferred=preferred, backup=backup):
                 return self._refresh_failed("config check failed, kept previous")
             with self._lock:
@@ -2519,15 +2532,27 @@ class RailwayManager:
         return False
     def _start_full_probe(self) -> bool:
         with self._lock:
-            if self.status["full_probe"].get("state") == "running":
-                return False
-            self.status["full_probe"] = {"state": "running", "done": 0, "total": len(self._nodes)}
+            cur = self.status.get("full_probe") or {}
+            if cur.get("state") == "running" and self._full_probe_thread is not None and self._full_probe_thread.is_alive():
+                if time.monotonic() - cur.get("started_at", 0.0) < STALE_RUNNING_AFTER:
+                    return False
+            self.status["full_probe"] = {"state": "running", "done": 0, "total": len(self._nodes), "started_at": time.monotonic()}
         thread = threading.Thread(target=self._run_full_probe, daemon=True, name="full-probe")
         self._full_probe_thread = thread
         thread.start()
         return True
     def _run_full_probe(self) -> None:
         time.sleep(0.2)
+        try:
+            self._run_full_probe_inner()
+        except Exception as exc:
+            print(f"full probe error: {type(exc).__name__}: {exc}", flush=True)
+        finally:
+            with self._lock:
+                if self.status.get("full_probe", {}).get("state") == "running":
+                    self.status["full_probe"]["state"] = "done"
+
+    def _run_full_probe_inner(self) -> None:
         with self._lock:
             nodes = list(self._nodes)
             self.status["full_probe"]["total"] = len(nodes)
