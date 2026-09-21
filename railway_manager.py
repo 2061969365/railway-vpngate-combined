@@ -1104,9 +1104,25 @@ async function refreshNow() {
   } else skeletonRows();
   try {
     const r = await api("/api/refresh", "POST", {});
-    if (!r.ok) toast("刷新完成但有失败", true);
+    if (r && r.accepted) {
+      for (let i = 0; i < 200; i++) {
+        await new Promise(rr => setTimeout(rr, 3000));
+        const s = await api("/api/status");
+        lastStatus = s;
+        renderAll(s);
+        const j = s.refresh_job;
+        if (j && j.state === "done") {
+          if (j.ok === false) toast("刷新完成但有失败" + (j.error ? ": " + j.error : ""), true);
+          break;
+        }
+        if (i === 199) toast("刷新仍在后台运行，请稍后查看", true);
+      }
+    } else if (r && !r.ok) toast("刷新完成但有失败", true);
     refreshLogs(null);
-  } catch (e) { if (!isAbort(e)) toast("刷新失败: " + e.message, true); }
+  } catch (e) {
+    if (isAbort(e)) return;
+    toast(/409/.test(e.message || "") ? "已有刷新进行中，稍后再试" : ("刷新失败: " + e.message), true);
+  }
   if (benchTable) benchTable.classList.remove("loading");
   if (thin) thin.classList.remove("show");
   setBusy("btn-refresh", false);
@@ -1533,15 +1549,15 @@ class RailwayManager:
         self._cloudflared_proc = None; self.preferred_tag = None; self.backup_tag = None; self._auto_pinned = False
         self._nodes: list[dict] = []; self._first_seen: dict[str, str] = {}
         self._cpu_model = _cpu_model(); self._cpu_cores = os.cpu_count(); self._cpu_last = None
-        self._fail_streak = 0; self._pinned_fail_streak = 0; self._rescue_round = 0; self._crash_streak = 0; self._retry_after = 0.0
+        self._fail_streak = 0; self._pinned_fail_streak = 0; self._rescue_round = 0; self._crash_streak = 0; self._retry_after = 0.0; self._mixed_fail_streak = 0; self._mixed_retry_after = 0.0
         self._lock = threading.RLock(); self._refresh_lock = threading.Lock(); self._config_lock = threading.Lock()
         self.status: dict = {"endpoints": [], "countries": [], "preferred_tag": None, "backup_tag": None, "auto_pinned": False,
             "refresh_history": [], "refresh_ok": 0, "refresh_fail": 0, "last_refresh": None, "last_error": None, "started_at": None,
             "proxy": f"127.0.0.1:{mixed_port}", "traffic": {"connections": 0, "bytes_up": 0, "bytes_down": 0},
-            "full_probe": {"state": "idle", "done": 0, "total": 0}, "probe": {"state": "idle", "tag": None, "ms": None, "error": None},
+            "full_probe": {"state": "idle", "done": 0, "total": 0}, "refresh_job": {"state": "idle", "started_at": None, "ok": None, "error": None}, "probe": {"state": "idle", "tag": None, "ms": None, "error": None},
             "verify": {"state": "idle", "exit_ip": None, "ms": None, "via_tag": None, "error": None, "checked_at": None},
             "tunnel": {"state": "off"}, "vless": ({"uuid": vless_uuid, "direct_path": vless_direct_path, "chain_path": vless_chain_path} if vless_uuid else None)}
-        self._full_probe_thread = None; self._single_probe_thread = None; self._verify_thread = None; self._verify_generation = 0
+        self._full_probe_thread = None; self._single_probe_thread = None; self._verify_thread = None; self._verify_generation = 0; self._refresh_thread = None
         self._stop_event = threading.Event(); self._mux_slots = threading.BoundedSemaphore(max_mux_connections); self._mux_inflight = 0
         self._post_slots = threading.BoundedSemaphore(MAX_POST_CONNECTIONS); self._health_check_interval = health_check_interval
         self._listener = None; self._singbox_proc = None; self._stderr_handle = None; self.bound_port = port
@@ -1764,8 +1780,12 @@ class RailwayManager:
 
     def _route_post(self, client: socket.socket, path: str, headers: dict, body: bytes) -> None:
         if path == "/api/refresh":
-            ok = self.refresh_once()
-            client.sendall(_http_response("200 OK", "application/json", json.dumps({"ok": ok}).encode()))
+            if not self._start_refresh_bg():
+                client.sendall(_http_response("409 Conflict", "application/json",
+                    json.dumps({"accepted": False, "error": "already running"}).encode()))
+                return
+            client.sendall(_http_response("202 Accepted", "application/json",
+                json.dumps({"accepted": True}).encode()))
         elif path == "/api/full_probe":
             if not self._start_full_probe():
                 client.sendall(_http_response("409 Conflict", "application/json", json.dumps({"accepted": False, "error": "already running"}).encode()))
@@ -1807,7 +1827,7 @@ class RailwayManager:
                 client.sendall(_http_response("400 Bad Request", "text/plain", b"invalid json"))
                 return
             ok, detail = self.switch(tag=payload.get("tag"), country=payload.get("country"))
-            status = "200 OK" if ok else "400 Bad Request"
+            status = "200 OK" if ok else ("409 Conflict" if detail == "busy, retry later" else "400 Bad Request")
             client.sendall(_http_response(status, "application/json", json.dumps({"ok": ok, "preferred_tag": self.preferred_tag, "detail": detail}).encode()))
         elif path == "/api/settings":
             try:
@@ -2077,11 +2097,24 @@ class RailwayManager:
         if alive:
             if has_ep and not self._mixed_reachable(timeout=2):
                 with self._lock:
-                    self.status["last_error"] = "sing-box alive but mixed unreachable, restarting"
+                    self._mixed_fail_streak += 1
+                    streak = self._mixed_fail_streak
+                    now = time.monotonic()
+                    if streak < 2 or now < self._mixed_retry_after:
+                        if streak == 1:
+                            self.status["last_error"] = "mixed unreachable once, watching"
+                        return
+                    delay = CRASH_BACKOFFS[min(self._crash_streak, len(CRASH_BACKOFFS) - 1)]
+                    self._crash_streak = min(self._crash_streak + 1, len(CRASH_BACKOFFS) - 1)
+                    self._mixed_retry_after = now + delay
+                    self.status["last_error"] = f"mixed unreachable {streak}x, restarting now, next retry in {delay}s"
                 self._record_history("supervise-mixed-dead", "mixed unreachable, restarting")
                 self._restart_singbox()
+                with self._lock:
+                    self._mixed_fail_streak = 0
                 return
             with self._lock:
+                self._mixed_fail_streak = 0
                 self._crash_streak = 0
                 return
         with self._lock:
@@ -2103,6 +2136,34 @@ class RailwayManager:
             cf_alive = cf is not None and cf.poll() is None
         if want_cf and not cf_alive:
             self._start_cloudflared()
+
+    def _note_mixed_down(self, reason: str) -> str:
+        """Gated serving-down handling shared by health checks.
+
+        A single 2s mixed miss (GC/refresh burst) must not restart serving:
+        needs 2 consecutive misses plus the crash backoff gate. Returns
+        "restarted" when a restart was issued, else "watching".
+        """
+        with self._lock:
+            self._mixed_fail_streak += 1
+            streak = self._mixed_fail_streak
+            now = time.monotonic()
+            if streak < 2 or now < self._mixed_retry_after:
+                if streak == 1:
+                    self.status["last_error"] = "serving unreachable once, watching"
+                return "watching"
+            delay = CRASH_BACKOFFS[min(self._crash_streak, len(CRASH_BACKOFFS) - 1)]
+            self._crash_streak = min(self._crash_streak + 1, len(CRASH_BACKOFFS) - 1)
+            self._mixed_retry_after = now + delay
+            self.status["last_error"] = f"serving unreachable {streak}x, restarting now, next retry in {delay}s"
+        self._record_history("health-serving-dead", reason)
+        try:
+            self._restart_singbox()
+        except Exception:
+            pass
+        with self._lock:
+            self._mixed_fail_streak = 0
+        return "restarted"
 
     def _health_monitor_loop(self) -> None:
         while not self._stop_event.wait(self._health_check_interval):
@@ -2127,9 +2188,39 @@ class RailwayManager:
             self._record_history("health-trigger-refresh", reason)
         except Exception:
             pass
+    def _fresh_probe_tags(self, cands: list[dict]) -> list[str]:
+        """Fresh-handshake filter for rescue targets (bounded, parallel).
+
+        Stale real_latency_ms alone must not decide a rescue: return only
+        tags with a live handshake right now, in ranking order.
+        """
+        short = cands[:EXIT_VERIFY_CAP]
+        if not short:
+            return []
+        alive: dict[str, int] = {}
+        def _one(node: dict) -> None:
+            try:
+                host, port = primary_server(node.get("endpoint") or node)
+                ms = probe_tcp_latency(host, port, 5)
+            except Exception:
+                ms = 0
+            if ms and ms > 0:
+                with self._lock:
+                    alive[((node.get("endpoint") or {}).get("tag"))] = ms
+        with ThreadPoolExecutor(max_workers=min(len(short), 3)) as ex:
+            list(ex.map(_one, short))
+        order = {((n.get("endpoint") or {}).get("tag")): k for k, n in enumerate(cands)}
+        return sorted(alive, key=lambda t: order.get(t, 10 ** 9))
+
     def check_pinned_health(self, probe_fn=None) -> str:
-        """Simple health: serving must be up + pinned handshake must pass. No real tunnel dial here
-        (real dials kill serving via duplicate-cn and OOM storms). Real dials only on demand."""
+        """Simple health: pinned handshake must pass; serving handled gated.
+
+        No real tunnel dial here (real dials kill serving via duplicate-cn
+        and OOM storms). Real dials only on demand (probe/verify/full_probe).
+        Rescue targets are fresh-handshake verified; stale ranking is only a
+        stopgap when every handshake is dead (pool likely stale: a background
+        refresh is triggered while the stale best holds the pin).
+        """
         with self._lock:
             tag = self.preferred_tag
             node = next((n for n in self._nodes if n.get("endpoint", {}).get("tag") == tag), None) if tag else None
@@ -2137,39 +2228,37 @@ class RailwayManager:
             round_id = self._rescue_round
         if tag is None or node is None:
             return "no-preferred"
-        if self.want_singbox and not self._serving_ok():
-            self._record_history("health-serving-dead", f"{tag} serving down, restarting")
-            try:
-                self._restart_singbox()
-            except Exception:
-                pass
-            return "restarted"
         host, port = primary_server(node.get("endpoint") or node)
         try:
             hand = probe_tcp_latency(host, port, 5)
         except Exception:
             hand = 0
         alive = hand > 0
-        with self._lock:
-            if alive:
+        if alive:
+            with self._lock:
                 node["latency_ms"] = hand
                 if self._pinned_fail_streak > 0:
                     self._record_history("health-dial-ok", f"{tag} handshake recovered ms={hand}")
                 self._pinned_fail_streak = 0
-                return "pinned"
+            if self.want_singbox and not self._serving_ok():
+                self._note_mixed_down(f"{tag} serving down, watching")
+            return "pinned"
+        with self._lock:
             self._pinned_fail_streak += 1
             streak = self._pinned_fail_streak
-            cands = sorted((n for n in self._nodes if (n.get("endpoint") or {}).get("tag") != tag and n.get("real_latency_ms") is not None),
-                key=lambda n: (n["real_latency_ms"], (n.get("endpoint") or {}).get("tag") or ""))
-            if not cands and self._nodes:
-                cands = sorted((n for n in self._nodes if (n.get("endpoint") or {}).get("tag") != tag and n.get("latency_ms") is not None),
-                    key=lambda n: (n.get("latency_ms") or 10**9,))
-            best = ((cands[0].get("endpoint") or {}).get("tag") if cands else None)
-            second = ((cands[1].get("endpoint") or {}).get("tag") if len(cands) > 1 else None)
+            if not self.auto_rescue:
+                cands = []
+            else:
+                cands = sorted((n for n in self._nodes if (n.get("endpoint") or {}).get("tag") != tag and n.get("real_latency_ms") is not None),
+                    key=lambda n: (n["real_latency_ms"], (n.get("endpoint") or {}).get("tag") or ""))
+                if not cands and self._nodes:
+                    cands = sorted((n for n in self._nodes if (n.get("endpoint") or {}).get("tag") != tag and n.get("latency_ms") is not None),
+                        key=lambda n: (n.get("latency_ms") or 10**9,))
+        if not cands:
             if streak < PINNED_FAIL_THRESHOLD:
                 return "pinned"
-            self._pinned_fail_streak = 0
-        if best is None:
+            with self._lock:
+                self._pinned_fail_streak = 0
             with self._config_lock:
                 with self._lock:
                     self.preferred_tag = None; self.backup_tag = None; self._auto_pinned = True
@@ -2182,6 +2271,22 @@ class RailwayManager:
             except Exception:
                 pass
             return "unpinned"
+        alive_tags = self._fresh_probe_tags(cands) if self.auto_rescue else []
+        stale = False
+        if alive_tags:
+            best, second = alive_tags[0], (alive_tags[1] if len(alive_tags) > 1 else None)
+        else:
+            stale = True
+            best = ((cands[0].get("endpoint") or {}).get("tag"))
+            second = ((cands[1].get("endpoint") or {}).get("tag") if len(cands) > 1 else None)
+            try:
+                self._trigger_bg_refresh(f"{tag} all handshakes dead")
+            except Exception:
+                pass
+        if streak < PINNED_FAIL_THRESHOLD and not (streak == 1 and best is not None):
+            return "pinned"
+        with self._lock:
+            self._pinned_fail_streak = 0
         with self._config_lock:
             if not self._apply_config(final="auto", preferred=best, backup=second):
                 return "pinned"
@@ -2192,8 +2297,9 @@ class RailwayManager:
                     self._apply_config(final="auto", preferred=cur, backup=cur_b)
                 return "pinned"
         self._invalidate_verify(f"rescued to {best}")
-        self._record_history("auto-rescue", f"{tag} handshake failed, rescued to {best}" + (f" backup={second}" if second else ""))
+        self._record_history("auto-rescue" + ("-stale" if stale else ""), f"{tag} handshake failed, rescued to {best}" + (f" backup={second}" if second else ""))
         return "rescued"
+
     def _commit_rescue(self, round_id: int, best: str | None, second: str | None) -> bool:
         with self._lock:
             if self._rescue_round != round_id:
@@ -2223,7 +2329,10 @@ class RailwayManager:
                     return False, f"unknown tag {tag}"
             target = node["endpoint"]["tag"] if node is not None else None
             effective = "chain" if target else "auto"
-        with self._config_lock:
+        # trylock: a long refresh apply must not wedge switch for minutes.
+        if not self._config_lock.acquire(timeout=5):
+            return False, "busy, retry later"
+        try:
             if not self._apply_config(final="auto", preferred=target):
                 return False, "config check failed, kept previous"
             with self._lock:
@@ -2231,6 +2340,11 @@ class RailwayManager:
                 self.preferred_tag = target; self.backup_tag = None; self._auto_pinned = False
                 self.status["preferred_tag"] = target; self.status["backup_tag"] = None; self.status["auto_pinned"] = False
                 self._rescue_round += 1; self._persist_state()
+        finally:
+            try:
+                self._config_lock.release()
+            except Exception:
+                pass
         if old != target:
             self._invalidate_verify(f"pin-changed to {target}")
         self._pinned_fail_streak = 0
@@ -2308,6 +2422,36 @@ class RailwayManager:
         if want_singbox:
             self._restart_singbox()
         return True
+
+    def _start_refresh_bg(self) -> bool:
+        """Start a snapshot refresh in background (202-style, single-flight).
+
+        TopK refresh holds the post slot for minutes (TopK x dial_timeout /
+        workers); answering sync would wedge every management POST behind
+        it. A second starter while one runs gets False (caller answers 409).
+        Progress is visible via status refresh_job.
+        """
+        with self._lock:
+            cur = self.status.get("refresh_job") or {}
+            if cur.get("state") == "running" and self._refresh_thread is not None and self._refresh_thread.is_alive():
+                if time.monotonic() - cur.get("started_at", 0.0) < STALE_RUNNING_AFTER:
+                    return False
+            self.status["refresh_job"] = {"state": "running", "started_at": time.monotonic(), "ok": None, "error": None}
+            thread = threading.Thread(target=self._run_refresh_bg, daemon=True, name="refresh-bg")
+            self._refresh_thread = thread
+            thread.start()
+        return True
+
+    def _run_refresh_bg(self) -> None:
+        try:
+            ok = self.refresh_once()
+            err = None if ok else (self.status.get("last_error") or "refresh failed")
+        except Exception as exc:
+            ok, err = False, f"{type(exc).__name__}: {exc}"
+        with self._lock:
+            self.status["refresh_job"] = {"state": "done",
+                "started_at": (self.status.get("refresh_job") or {}).get("started_at"),
+                "ok": ok, "error": err}
 
     def refresh_once(self, fetcher=None, probe_pool: int = 0) -> bool:
         if not self._refresh_lock.acquire(blocking=False):
