@@ -35,6 +35,52 @@ _AUTH_RE = re.compile(r"^\s*auth\s+(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
 _CIPHER_RE = re.compile(r"^\s*cipher\s+(\S+)\s*$", re.IGNORECASE | re.MULTILINE)
 _REMOTE_RANDOM_RE = re.compile(r"^\s*remote-random\s*$", re.IGNORECASE | re.MULTILINE)
 _KEY_DIRECTION_RE = re.compile(r"^\s*key-direction\s+(\d+)\s*$", re.IGNORECASE | re.MULTILINE)
+_KEEPALIVE_RE = re.compile(r"^\s*keepalive\s+(\d+)\s+(\d+)\s*$", re.IGNORECASE | re.MULTILINE)
+_PING_RE = re.compile(r"^\s*ping\s+(\d+)\s*$", re.IGNORECASE | re.MULTILINE)
+_PING_RESTART_RE = re.compile(r"^\s*ping-restart\s+(\d+)\s*$", re.IGNORECASE | re.MULTILINE)
+_RENEG_SEC_RE = re.compile(r"^\s*reneg-sec\s+(\d+)\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def _keepalive_fields(config_text: str) -> dict:
+    """Map OpenVPN keepalive directives to sing-box openvpn-client fields.
+
+    keepalive <interval> <timeout> == ping <interval> + ping-restart
+    <timeout>. Values are clamped to sane ranges; unparsable values are
+    ignored. Defaults (10s/60s, the common keepalive 10 60) keep idle NAT
+    mappings alive when the profile sets nothing: without them an idle
+    tunnel is reaped after ~10min while TCP 443 still answers, which looks
+    exactly like "verified IP but cannot connect".
+    """
+    fields: dict = {}
+    try:
+        ka = _KEEPALIVE_RE.search(config_text)
+        if ka:
+            iv, to = int(ka.group(1)), int(ka.group(2))
+            if 1 <= iv <= 3600:
+                fields["ping_interval"] = f"{iv}s"
+            if 1 <= to <= 86400:
+                fields["ping_restart"] = f"{to}s"
+        else:
+            pm = _PING_RE.search(config_text)
+            if pm and 1 <= int(pm.group(1)) <= 3600:
+                fields["ping_interval"] = f"{int(pm.group(1))}s"
+            prm = _PING_RESTART_RE.search(config_text)
+            if prm and 1 <= int(prm.group(1)) <= 86400:
+                fields["ping_restart"] = f"{int(prm.group(1))}s"
+        rs = _RENEG_SEC_RE.search(config_text)
+        if rs:
+            v = int(rs.group(1))
+            if v == 0:
+                fields["renegotiate_disabled"] = True
+            elif 1 <= v <= 30 * 86400:
+                fields["renegotiate_interval"] = f"{v}s"
+    except (ValueError, AttributeError):
+        pass
+    if "ping_interval" not in fields:
+        fields["ping_interval"] = "10s"
+    if "ping_restart" not in fields:
+        fields["ping_restart"] = "60s"
+    return fields
 
 
 def _is_tcp_proto(proto: str) -> bool:
@@ -139,6 +185,7 @@ def ovpn_to_endpoint(
         "data_ciphers": data_ciphers,
         "data_ciphers_fallback": data_ciphers[0],
         "auth": auth,
+        **_keepalive_fields(config_text),
         **({"remote_random": True} if _REMOTE_RANDOM_RE.search(config_text) else {}),
         "system": False,
         "redirect_gateway": True,
@@ -611,9 +658,11 @@ def snapshot_to_nodes(
 
     With real_topk>0 the top-K handshake winners are additionally dialed
     through a real tunnel and re-ranked: measured nodes first by real
-    end-to-end latency, the rest by handshake latency. Dial failures and
-    exceptions keep the node as unmeasured instead of dropping it.
-    Returns [] when nothing is reachable (caller decides failure).
+    end-to-end latency, the rest by handshake latency. Dial failures are
+    refilled from the next handshake-ranked nodes until real_topk measured
+    or the pool is exhausted; persistent failures stay unmeasured (None)
+    and sort last. Returns [] when nothing is reachable (caller decides
+    failure).
     """
     if probe_pool is not None and probe_pool < 0:
         raise ValueError(f"probe_pool must be >= 0, got {probe_pool}")
@@ -666,11 +715,19 @@ def snapshot_to_nodes(
     if real_topk and real_topk > 0 and nodes:
         dial = dial_fn if dial_fn is not None else (
             lambda node: measure_real_latency(node["endpoint"], singbox_bin, dial_timeout))
+        target = min(real_topk, len(nodes))
         with ThreadPoolExecutor(max_workers=dial_workers) as executor:
-            future_map = {executor.submit(_safe_dial, dial, node): node
-                          for node in nodes[:real_topk]}
-            for future in future_map:
-                future_map[future]["real_latency_ms"] = future.result()
+            idx = 0
+            measured = 0
+            while measured < target and idx < len(nodes):
+                batch = nodes[idx:idx + max(1, target - measured)]
+                idx += len(batch)
+                future_map = {executor.submit(_safe_dial, dial, node): node
+                              for node in batch}
+                for future in future_map:
+                    future_map[future]["real_latency_ms"] = future.result()
+                measured = sum(1 for n in nodes[:idx]
+                               if n.get("real_latency_ms") is not None)
         nodes.sort(key=lambda n: (0, n["real_latency_ms"])
                    if n["real_latency_ms"] is not None
                    else (1, n["latency_ms"] if n["latency_ms"] is not None else 10 ** 9))
