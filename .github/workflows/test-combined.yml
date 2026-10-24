@@ -396,7 +396,15 @@ jobs:
           grep -q "ws-chain" /tmp/disguise.html
           grep -q "nodeLinkChain" /tmp/disguise.html
           echo "disguise page serves both direct + chain links"
-          curl -m 10 -s http://127.0.0.1:4096/health -o /dev/null -w "cc-switch: %{http_code}\n"
+          curl -m 10 -s http://127.0.0.1:4096/health -o /tmp/zen-health.json -w "zen-direct: %{http_code}\n"
+          python3 - <<'EOF'
+          import json
+          h = json.load(open("/tmp/zen-health.json"))
+          assert h["status"] == "ok", h
+          assert h["sidecar"]["state"] == "running", h["sidecar"]
+          print("zen-direct OK:", h.get("version"), "sidecar pid", h["sidecar"].get("pid"),
+                "port", h["sidecar"].get("port"))
+          EOF
           curl -m 10 -s -X POST -H "Authorization: Bearer smoke-admin-token-0123456789" \
             http://127.0.0.1:3000/api/switch -d '{"tag":"auto"}' | grep -q '"ok": true'
           echo "switch-to-auto OK"

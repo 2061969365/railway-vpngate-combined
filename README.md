@@ -1,8 +1,23 @@
 # railway-vpngate-combined
 
 VPNGate 免费节点（sing-box `openvpn-client`，免 TUN/免特权）+ 双 VLESS+WS 入站，
-经 Cloudflare Tunnel 对外提供。CC Switch / 伪装页 / 哪吒探针从
-`railway-proxy-combined` 全量搬运（Xray 由 sing-box 原生 VLESS 入站替代）。
+经 Cloudflare Tunnel 对外提供。伪装页 / 哪吒探针从
+`railway-proxy-combined` 全量搬运（Xray 由 sing-box 原生 VLESS 入站替代）；
+4096 端口跑 `zen-direct`（OpenCode Zen 的 OpenAI 兼容网关，内含 Bun sidecar，
+直连 opencode.ai，不走代理）。
+
+## zen-direct（4096）
+
+| 项 | 值 |
+|---|---|
+| 端点 | `POST /v1/chat/completions`、`POST /v1/messages`、`GET /health` |
+| 上游 | `https://opencode.ai/inference/v1`（**直连**，容器内 `unset` 所有 `*_PROXY`） |
+| 二进制 | `zen-direct-linux-amd64`（v0.8.1，linux/amd64，sidecar JS + 官方提示词已 `go:embed`） |
+| Bun | `vendor/bun-linux-x64.zip`（v1.4.4，构建时校验 sha256 后解压到 `/usr/local/bin/bun`） |
+| sidecar | 释放到 `/tmp/zen-sidecar`，端口自动选；每请求新建连接（换出口 IP 立即生效） |
+
+`GET /health` 里能看到 `sidecar.state/pid/port/restarts`；sidecar 日志走
+`bun|` 前缀进 `/tmp/zen.log`，成功请求形如 `inject=1 tools=45 msgs=9 -> 200`。
 
 ## 双流量（冻结方案）
 

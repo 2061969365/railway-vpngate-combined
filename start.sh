@@ -1,7 +1,7 @@
 #!/bin/bash
 # Combined entrypoint: vpngate manager (sing-box + cloudflared) +
-# CC Switch proxy + disguise page + optional nezha (ported from
-# railway-proxy-combined; Xray replaced by sing-box VLESS+WS inbounds).
+# zen-direct gateway (OpenCode Zen, 4096) + disguise page + optional nezha
+# (ported from railway-proxy-combined; Xray replaced by sing-box VLESS+WS inbounds).
 set -e
 
 # === 1. UUID (one value for both VLESS inbounds; env may override) ===
@@ -32,7 +32,7 @@ fi
 _term() {
   echo "[shutdown] SIGTERM, stopping children..."
   kill -TERM "$MANAGER_PID" 2>/dev/null || true
-  kill -TERM "$PROXY_PID" "$HTTP_PID" "$NEZHA_PID" 2>/dev/null || true
+  kill -TERM "$ZEN_PID" "$HTTP_PID" "$NEZHA_PID" 2>/dev/null || true
   wait "$MANAGER_PID" 2>/dev/null || true
   exit 0
 }
@@ -59,26 +59,33 @@ python3 -m http.server 8081 --directory /app/www > /tmp/httpd.log 2>&1 &
 HTTP_PID=$!
 echo "[debug] httpd PID=$HTTP_PID"
 
-# === 5. CC Switch native proxy engine (4096, unchanged) ===
-echo "[init] starting CC Switch proxy (4096)..."
-PORT=4096 HOST=0.0.0.0 /usr/local/bin/cc-switch-server > /tmp/proxy.log 2>&1 &
-PROXY_PID=$!
-echo "[debug] CC Switch proxy PID=$PROXY_PID"
+# === 5. zen-direct gateway (4096): OpenCode Zen, OpenAI-compatible ===
+# Direct upstream on purpose: this container's egress IS the clean IP we want,
+# so no proxy env may leak in from the platform - unset first, then start.
+unset HTTPS_PROXY HTTP_PROXY ALL_PROXY https_proxy http_proxy all_proxy
+echo "[init] starting zen-direct (4096)..."
+PORT=4096 \
+DIRECT_SIDECAR=auto \
+ZEN_SIDECAR_DIR=/tmp/zen-sidecar \
+OPENCODE_ZEN_BASE=https://opencode.ai/inference/v1 \
+/usr/local/bin/zen-direct > /tmp/zen.log 2>&1 &
+ZEN_PID=$!
+echo "[debug] zen-direct PID=$ZEN_PID"
 
 for i in $(seq 1 15); do
   sleep 2
   if curl -s --max-time 3 http://127.0.0.1:4096/health >/dev/null 2>&1; then
-    echo "[debug] CC Switch proxy ready (attempt $i)"
+    echo "[debug] zen-direct ready (attempt $i): $(curl -s --max-time 3 http://127.0.0.1:4096/health)"
     break
   fi
-  if ! kill -0 $PROXY_PID 2>/dev/null; then
-    echo "[ERR] proxy process exited, log:"
-    cat /tmp/proxy.log 2>&1 || true
+  if ! kill -0 $ZEN_PID 2>/dev/null; then
+    echo "[ERR] zen-direct exited, log:"
+    cat /tmp/zen.log 2>&1 || true
     break
   fi
   if [ $i -eq 15 ]; then
-    echo "[ERR] proxy not ready after 15 attempts, last log:"
-    cat /tmp/proxy.log 2>&1 || true
+    echo "[ERR] zen-direct not ready after 15 attempts, last log:"
+    cat /tmp/zen.log 2>&1 || true
   fi
 done
 
@@ -115,13 +122,15 @@ while true; do
     echo "[ERR] manager died, exiting to trigger restart"
     exit 1
   fi
-  if ! kill -0 $PROXY_PID 2>/dev/null; then
-    echo "[WARN] CC Switch proxy died, restarting once..."
-    PORT=4096 HOST=0.0.0.0 /usr/local/bin/cc-switch-server > /tmp/proxy.log 2>&1 &
-    PROXY_PID=$!
+  if ! kill -0 $ZEN_PID 2>/dev/null; then
+    echo "[WARN] zen-direct died, restarting once..."
+    PORT=4096 DIRECT_SIDECAR=auto ZEN_SIDECAR_DIR=/tmp/zen-sidecar \
+      OPENCODE_ZEN_BASE=https://opencode.ai/inference/v1 \
+      /usr/local/bin/zen-direct >> /tmp/zen.log 2>&1 &
+    ZEN_PID=$!
     sleep 5
-    if ! kill -0 $PROXY_PID 2>/dev/null; then
-      echo "[ERR] proxy restart failed, exiting to trigger restart"
+    if ! kill -0 $ZEN_PID 2>/dev/null; then
+      echo "[ERR] zen-direct restart failed, exiting to trigger restart"
       exit 1
     fi
   fi
